@@ -1,0 +1,25 @@
+# Claude / workflow artifacts (local only)
+docs/
+.remember/
+.wandavision_workspace/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+build/
+dist/
+.venv/
+
+# Local test artefacts (scratch NTFS images, etc.)
+*.img
+
+# Claude Code local files
+.claude/settings.local.json
+.claude/session-profiler.log
