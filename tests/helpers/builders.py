@@ -9,6 +9,8 @@ in Phase 2.
 """
 
 import copy
+import re
+import zlib
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -23,6 +25,7 @@ SCHEMA_VERSION_LINE = "schema_version = 1"
 TOML_ESCAPES = {'"': '\\"', "\\": "\\\\"}
 DELETE = "\x7f"
 FIRST_PRINTABLE = " "
+BARE_KEY = re.compile(r"[A-Za-z0-9_-]+")
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,6 +98,87 @@ def registry_text(volumes: Iterable[RegistryVolume]) -> str:
 
 def _volume_name(volume: RegistryVolume) -> str:
     return volume.name
+
+
+def toml_value(value: object) -> str:
+    """A TOML value for a string, boolean, integer or list of those.
+
+    Lets a test write entries the emitter never would: wrong types, unknown
+    keys, missing keys.
+    """
+    if isinstance(value, bool):
+        return toml_bool(value)
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, str):
+        return toml_string(value)
+    if isinstance(value, list | tuple):
+        return "[" + ", ".join(toml_value(item) for item in value) + "]"
+    raise TypeError(f"no TOML form for {type(value).__name__}")
+
+
+def raw_volume_table(fields: Mapping[str, object]) -> str:
+    """One ``[[volume]]`` table with exactly ``fields``, in their order."""
+    lines = ["[[volume]]"]
+    lines.extend(
+        f"{toml_key(key)} = {toml_value(value)}" for key, value in fields.items()
+    )
+    return "\n".join(lines) + "\n"
+
+
+def toml_key(key: str) -> str:
+    """A bare key when TOML allows one, else a quoted key."""
+    return key if BARE_KEY.fullmatch(key) else toml_string(key)
+
+
+def raw_registry_text(tables: Iterable[str], *, top: str = SCHEMA_VERSION_LINE) -> str:
+    """Registry text with ``top`` as the top-level lines and raw tables after it."""
+    return "\n".join([f"{REGISTRY_HEADER}\n{top}\n", *tables])
+
+
+def volume_fields(volume: RegistryVolume) -> dict[str, object]:
+    """``volume`` as the key/value pairs of its table, ``drivers`` only when set."""
+    fields: dict[str, object] = {
+        "name": volume.name,
+        "uuid": volume.uuid,
+        "path": volume.path,
+        "fstype": volume.fstype,
+    }
+    if volume.drivers is not None:
+        fields["drivers"] = list(volume.drivers)
+    fields["nosuid"] = volume.nosuid
+    fields["nodev"] = volume.nodev
+    return fields
+
+
+MANY_FSTYPES = ("ntfs", "exfat", "vfat", "btrfs", "BitLocker")
+
+
+def many_volumes(count: int) -> tuple[RegistryVolume, ...]:
+    """``count`` valid volumes with distinct names, UUIDs and sibling paths.
+
+    The UUID forms rotate through the three the schema allows; every fifth
+    volume of type ``ntfs`` carries a ``drivers`` list.
+    """
+    volumes = []
+    for index in range(count):
+        fstype = MANY_FSTYPES[index % len(MANY_FSTYPES)]
+        uuid_forms = (
+            f"{index:04X}-{index:04X}",
+            f"{index:016X}",
+            f"{index:08x}-0000-4000-8000-{index:012x}",
+        )
+        volumes.append(
+            RegistryVolume(
+                name=f"DRIVE{index:03d}",
+                uuid=uuid_forms[index % len(uuid_forms)],
+                path=f"/run/media/deck/DRIVE{index:03d}",
+                fstype=fstype,
+                drivers=("ntfs-3g", "ntfs3:ro") if fstype == "ntfs" else None,
+                nosuid=index % 2 == 0,
+            )
+        )
+    return tuple(volumes)
 
 
 # --- runtime state records (format 1) -----------------------------------------
@@ -202,6 +286,15 @@ LSBLK_KEYS = (
 )
 LSBLK_CHILDREN = "children"
 LSBLK_BOOLEAN_KEYS = ("hotplug", "rm", "ro")
+# Default device numbers: the kernel's extended block major, and a minor taken
+# from the kname so each built device gets its own (minors are 20 bits wide).
+LSBLK_DEFAULT_MAJOR = 259
+MINOR_MASK = (1 << 20) - 1
+
+
+def default_devnum(kname: str) -> str:
+    """A valid, stable ``MAJ:MIN`` for ``kname``; real lsblk always prints one."""
+    return f"{LSBLK_DEFAULT_MAJOR}:{zlib.crc32(kname.encode()) & MINOR_MASK}"
 
 
 def lsblk_device(
@@ -209,8 +302,9 @@ def lsblk_device(
 ) -> dict[str, Any]:
     """One lsblk JSON node; ``columns`` overrides defaults and may add children.
 
-    Defaults: a partition named ``kname`` at ``/dev/<kname>``, size 0, not
-    mounted, booleans false and every other column null. lsblk omits
+    Defaults: a partition named ``kname`` at ``/dev/<kname>`` with
+    ``default_devnum(kname)``, size 0, not mounted, booleans false and every
+    other column null. lsblk omits
     ``children`` when a device has none, and so does this builder.
     """
     columns = dict(columns or {})
@@ -220,6 +314,7 @@ def lsblk_device(
     device: dict[str, Any] = dict.fromkeys(LSBLK_KEYS)
     device.update(dict.fromkeys(LSBLK_BOOLEAN_KEYS, False))
     device.update(name=kname, kname=kname, path=f"/dev/{kname}", type="part", size=0)
+    device["maj:min"] = default_devnum(kname)
     device["mountpoints"] = []
     device.update(columns)
     return device

@@ -10,6 +10,7 @@ real /usr/bin/rsync for the keep-list replay.
 
 import json
 import os
+import re
 import tomllib
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -502,6 +503,50 @@ def test_registry_text_escapes_strings_like_the_emitter():
     assert tomllib.loads(text)["volume"][0]["path"] == volume.path
 
 
+def test_raw_registry_text_writes_exactly_the_given_fields():
+    table = builders.raw_volume_table(
+        {"name": "X", "nosuid": "yes", "drivers": [], "key": "k", "count": 3}
+    )
+
+    parsed = tomllib.loads(builders.raw_registry_text([table]))
+
+    assert parsed == {
+        "schema_version": 1,
+        "volume": [
+            {"name": "X", "nosuid": "yes", "drivers": [], "key": "k", "count": 3}
+        ],
+    }
+
+
+def test_raw_registry_text_takes_other_top_level_lines():
+    text = builders.raw_registry_text([], top="schema_version = 2\nextra = true")
+
+    assert tomllib.loads(text) == {"schema_version": 2, "extra": True}
+
+
+def test_raw_volume_table_rejects_a_value_toml_cannot_hold():
+    with pytest.raises(TypeError, match="float"):
+        builders.raw_volume_table({"name": 1.5})
+
+
+def test_volume_fields_round_trip_through_the_raw_table():
+    fields = builders.volume_fields(builders.PERSONAL)
+
+    text = builders.raw_registry_text([builders.raw_volume_table(fields)])
+
+    assert text == builders.registry_text((builders.PERSONAL,))
+
+
+def test_many_volumes_are_distinct_and_cover_every_form():
+    volumes = builders.many_volumes(50)
+
+    assert len({volume.name.lower() for volume in volumes}) == 50
+    assert len({volume.uuid.lower() for volume in volumes}) == 50
+    assert len({volume.path for volume in volumes}) == 50
+    assert {volume.fstype for volume in volumes} == set(builders.MANY_FSTYPES)
+    assert {len(volume.uuid) for volume in volumes} == {9, 16, 36}
+
+
 def test_record_dict_is_the_design_doc_example_by_default():
     record = builders.record_dict()
 
@@ -550,6 +595,14 @@ def test_lsblk_device_has_every_lsblk_column():
     assert device["kname"] == "sdc1"
     assert device["path"] == "/dev/sdc1"
     assert device["mountpoints"] == []
+
+
+def test_lsblk_device_has_a_stable_device_number_of_its_own():
+    first = builders.lsblk_device("sdc1")["maj:min"]
+
+    assert re.fullmatch(r"259:[0-9]+", first)
+    assert builders.lsblk_device("sdc1")["maj:min"] == first
+    assert builders.lsblk_device("sdd1")["maj:min"] != first
 
 
 def test_lsblk_device_applies_columns_and_children():

@@ -7,7 +7,11 @@ color, no cursor control). Every C0, DEL and C1 code point is pushed through
 the real ``Output`` into real streams; no control character other than tab
 may come out, apart from the newline that ends each line.
 
-Extended later: state words and next steps (P2-T08), doctor lines (P5-T03).
+State words and next steps (P2-T08, Design Doc "list and scan Output", UI
+metrics 1 and 2): every ``VolumeState``, with no reason and with every reason
+code ``state`` knows, renders words, and a next step for every non-healthy
+state; the rendered ``list`` block carries no ESC byte and no color, even when
+the volume name is hostile. Extended later: doctor lines (P5-T03).
 """
 
 import io
@@ -16,7 +20,9 @@ import unicodedata
 
 import pytest
 
+from steamos_mounter import state
 from steamos_mounter.errors import ExitCode
+from steamos_mounter.model import VolumeState
 from steamos_mounter.output import Output
 
 TAB = "\t"
@@ -25,6 +31,57 @@ DEL = "\x7f"
 C1 = [chr(code) for code in range(0x80, 0xA0)]
 EVERY_CONTROL = [*C0, DEL, *C1]
 HOSTILE = "".join(EVERY_CONTROL)
+ESC = "\x1b"
+CLI = "sudo /opt/steamos-mounter/bin/steamos-mounter"
+HEALTHY = frozenset({VolumeState.MOUNTED_RW})
+NO_STEP = "-"
+# The reason codes the Design Doc names, per state; state.py must know them all.
+DESIGN_REASONS = {
+    VolumeState.NEEDS_KEY: {
+        "stored_key_missing",
+        "stored_key_rejected",
+        "no_session",
+        "session_not_sure",
+        "dialog_open",
+        "dialog_failed",
+        "key_permissions",
+    },
+    VolumeState.MOUNT_FAILED: {
+        "fstype_mismatch",
+        "device_busy",
+        "no_free_name",
+        "probe_failed",
+        "registry_entry_invalid",
+        "os_partition",
+    },
+    VolumeState.MOUNTED_RO: {"unsafe"},
+    VolumeState.MOUNTED_RW_DIRTY: {"dirty"},
+    VolumeState.NOT_MOUNTED: {"no_partition_instance"},
+}
+
+
+def state_reason_pairs() -> list[tuple[VolumeState, str | None]]:
+    pairs: list[tuple[VolumeState, str | None]] = [(item, None) for item in VolumeState]
+    for item, reasons in state.KNOWN_REASONS.items():
+        pairs.extend((item, reason) for reason in sorted(reasons))
+    return pairs
+
+
+def pair_id(pair: tuple[VolumeState, str | None]) -> str:
+    item, reason = pair
+    return f"{item.value}-{reason or 'none'}"
+
+
+def render_block(item: VolumeState, reason: str | None, name: str) -> str:
+    """A ``list`` text block for one volume, written through the real ``Output``."""
+    out = io.StringIO()
+    output = Output(out=out, err=io.StringIO())
+    output.line(name)
+    output.line(f"  state:   {state.words(item, reason)}")
+    warning = state.warning(item, reason, name=name)
+    output.line(f"  warning: {warning or NO_STEP}")
+    output.line(f"  next:    {state.next_step(item, reason, name=name, cli_root=CLI)}")
+    return out.getvalue()
 
 
 def control_characters(text: str) -> set[str]:
@@ -86,3 +143,48 @@ def test_exit_codes_are_distinct_and_numbered_zero_to_eight():
 
     assert len(values) == len(set(values))
     assert sorted(values) == list(range(9))
+
+
+# --- state words and next steps (P2-T08) ----------------------------------------------
+
+
+def test_state_knows_every_reason_the_design_names():
+    for item, reasons in DESIGN_REASONS.items():
+        assert reasons <= set(state.KNOWN_REASONS.get(item, ()))
+
+
+@pytest.mark.parametrize("pair", state_reason_pairs(), ids=pair_id)
+def test_every_state_and_reason_renders_words(pair):
+    item, reason = pair
+
+    text = state.words(item, reason)
+
+    assert text.strip()
+    assert ESC not in text
+    assert control_characters(text) == set()
+
+
+@pytest.mark.parametrize("pair", state_reason_pairs(), ids=pair_id)
+def test_every_non_healthy_state_and_reason_renders_a_next_step(pair):
+    item, reason = pair
+
+    step = state.next_step(item, reason, name="MEDIABOX", cli_root=CLI)
+
+    assert ESC not in step
+    assert control_characters(step) == set()
+    if item in HEALTHY:
+        assert step == NO_STEP
+    else:
+        assert step not in ("", NO_STEP)
+
+
+@pytest.mark.parametrize("pair", state_reason_pairs(), ids=pair_id)
+def test_list_block_has_no_esc_and_no_color_even_for_a_hostile_name(pair):
+    item, reason = pair
+
+    text = render_block(item, reason, f"\x1b[31mRED{HOSTILE}NAME")
+
+    assert ESC not in text
+    assert control_characters(text) <= {TAB, "\n"}
+    assert "[31m" in text  # only the ESC byte is dropped; the rest stays visible
+    assert text.count("\n") == 4

@@ -1,0 +1,13 @@
+# synthetic: generic kernel ntfs (opt-in driver) read-write read-back (MEDIABOX on sdb5) until V-11; shape of findmnt-sda1-adr-columns.json plus the MAJ:MIN column
+{
+   "filesystems": [
+      {
+         "target": "/run/media/deck/MEDIABOX",
+         "source": "/dev/sdb5",
+         "fstype": "ntfs",
+         "vfs-options": "rw,nosuid,nodev,relatime",
+         "fs-options": "rw,uid=1000,gid=1000,fmask=0022,dmask=0022",
+         "maj:min": "8:21"
+      }
+   ]
+}

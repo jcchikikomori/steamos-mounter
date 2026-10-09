@@ -1,0 +1,2 @@
+# synthetic: dmsetup deps -o devno -j 252 -m 0 for dm-0 stacked on sdb1 (8:17), shape from the Design Doc "BitLocker Unlock and Mappings" table; replaced by the V-13 capture (deferred task 54)
+1 dependencies	: (8, 17)

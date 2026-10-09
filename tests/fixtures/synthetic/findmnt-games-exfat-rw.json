@@ -1,0 +1,13 @@
+# synthetic: exfat read-back of the GAMES stick (sdc1) until V-11; nosuid,nodev and no noexec; shape of findmnt-sda1-adr-columns.json plus the MAJ:MIN column
+{
+   "filesystems": [
+      {
+         "target": "/run/media/deck/GAMES",
+         "source": "/dev/sdc1",
+         "fstype": "exfat",
+         "vfs-options": "rw,nosuid,nodev,relatime",
+         "fs-options": "rw,uid=1000,gid=1000,fmask=0022,dmask=0022,iocharset=utf8,errors=remount-ro",
+         "maj:min": "8:33"
+      }
+   ]
+}

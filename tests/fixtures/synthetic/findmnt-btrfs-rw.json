@@ -1,0 +1,13 @@
+# synthetic: generic btrfs read-write read-back (DATA on sdc1) until V-11; anonymous MAJ:MIN like the real / row; shape of findmnt-sda1-adr-columns.json plus the MAJ:MIN column
+{
+   "filesystems": [
+      {
+         "target": "/run/media/deck/DATA",
+         "source": "/dev/sdc1",
+         "fstype": "btrfs",
+         "vfs-options": "rw,nosuid,nodev,relatime",
+         "fs-options": "rw,ssd,space_cache=v2,subvolid=5,subvol=/",
+         "maj:min": "0:61"
+      }
+   ]
+}

@@ -1,0 +1,31 @@
+{
+  "inputs": {
+    "tree": "deck/lsblk-columns-tree.json",
+    "os_partitions": "deck/udev-run-90-holo-partsets-all.rules.txt",
+    "sysfs": "deck/sysfs-facts.txt (slaves, holders, dm/name) and DEVPATH of deck/udev-*.txt",
+    "registry": ["MEDIABOX", "PERSONAL"]
+  },
+  "routes": [
+    {"kind": "registered", "kname": "sdb5", "uuid": "01D95F1575592A30", "action": "mount-registered", "reason": "registered volume", "device": "sdb5", "volume": "MEDIABOX", "path": "/run/media/deck/MEDIABOX", "inner": null, "mapping_name": null, "delegate_unit": null},
+    {"kind": "registered", "kname": "sdb1", "uuid": "658207d5-5177-4a52-a297-31643c64724d", "action": "mount-inner-registered", "reason": "registered BitLocker volume, already unlocked", "device": "sdb1", "volume": "PERSONAL", "path": "/run/media/deck/PERSONAL", "inner": "dm-0", "mapping_name": "PAT4T4SHUAWEI_PERSONAL_4_3_2024", "delegate_unit": null},
+    {"kind": "auto", "kname": "sda", "uuid": null, "action": "ignore", "reason": "no filesystem", "device": "sda", "volume": null, "path": null, "inner": null, "mapping_name": null, "delegate_unit": null},
+    {"kind": "auto", "kname": "sda1", "uuid": "4af5710c-af99-491b-b8dd-e3050268b8be", "action": "ignore", "reason": "ext4: SteamOS handles it", "device": "sda1", "volume": null, "path": null, "inner": null, "mapping_name": null, "delegate_unit": null},
+    {"kind": "auto", "kname": "sdb", "uuid": null, "action": "ignore", "reason": "no filesystem", "device": "sdb", "volume": null, "path": null, "inner": null, "mapping_name": null, "delegate_unit": null},
+    {"kind": "auto", "kname": "sdb1", "uuid": "658207d5-5177-4a52-a297-31643c64724d", "action": "yield", "reason": "registered: the registered instance owns it", "device": "sdb1", "volume": "PERSONAL", "path": "/run/media/deck/PERSONAL", "inner": null, "mapping_name": null, "delegate_unit": null},
+    {"kind": "auto", "kname": "dm-0", "uuid": "88D48067D48058F8", "action": "delegate", "reason": "foreign unlock: the partition instance mounts it", "device": "dm-0", "volume": "PERSONAL", "path": "/run/media/deck/PERSONAL", "inner": null, "mapping_name": "PAT4T4SHUAWEI_PERSONAL_4_3_2024", "delegate_unit": "steamos-mounter@dev-disk-by\\x2duuid-658207d5\\x2d5177\\x2d4a52\\x2da297\\x2d31643c64724d.service"},
+    {"kind": "auto", "kname": "sdb2", "uuid": null, "action": "ignore", "reason": "no filesystem", "device": "sdb2", "volume": null, "path": null, "inner": null, "mapping_name": null, "delegate_unit": null},
+    {"kind": "auto", "kname": "sdb5", "uuid": "01D95F1575592A30", "action": "yield", "reason": "registered: the registered instance owns it", "device": "sdb5", "volume": "MEDIABOX", "path": "/run/media/deck/MEDIABOX", "inner": null, "mapping_name": null, "delegate_unit": null},
+    {"kind": "auto", "kname": "mmcblk0", "uuid": null, "action": "ignore", "reason": "no filesystem", "device": "mmcblk0", "volume": null, "path": null, "inner": null, "mapping_name": null, "delegate_unit": null},
+    {"kind": "auto", "kname": "mmcblk0p1", "uuid": "8bae03f9-68b5-4458-9a49-34489a2a315d", "action": "ignore", "reason": "ext4: SteamOS handles it", "device": "mmcblk0p1", "volume": null, "path": null, "inner": null, "mapping_name": null, "delegate_unit": null},
+    {"kind": "auto", "kname": "zram0", "uuid": "4b2d1646-8f13-4483-a2ac-e9a81c88f01d", "action": "ignore", "reason": "unsupported filesystem type", "device": "zram0", "volume": null, "path": null, "inner": null, "mapping_name": null, "delegate_unit": null},
+    {"kind": "auto", "kname": "nvme0n1", "uuid": null, "action": "ignore", "reason": "no filesystem", "device": "nvme0n1", "volume": null, "path": null, "inner": null, "mapping_name": null, "delegate_unit": null},
+    {"kind": "auto", "kname": "nvme0n1p1", "uuid": "C40C-B21F", "action": "ignore", "reason": "OS partition", "device": "nvme0n1p1", "volume": null, "path": null, "inner": null, "mapping_name": null, "delegate_unit": null},
+    {"kind": "auto", "kname": "nvme0n1p2", "uuid": "C40D-6737", "action": "ignore", "reason": "OS partition", "device": "nvme0n1p2", "volume": null, "path": null, "inner": null, "mapping_name": null, "delegate_unit": null},
+    {"kind": "auto", "kname": "nvme0n1p3", "uuid": "C40E-16F6", "action": "ignore", "reason": "OS partition", "device": "nvme0n1p3", "volume": null, "path": null, "inner": null, "mapping_name": null, "delegate_unit": null},
+    {"kind": "auto", "kname": "nvme0n1p4", "uuid": "57965dd9-f51e-409a-bcb2-40b5787afd0a", "action": "ignore", "reason": "OS partition", "device": "nvme0n1p4", "volume": null, "path": null, "inner": null, "mapping_name": null, "delegate_unit": null},
+    {"kind": "auto", "kname": "nvme0n1p5", "uuid": "7c1d2c2b-46d3-41e7-b7ad-e58ecc100598", "action": "ignore", "reason": "OS partition", "device": "nvme0n1p5", "volume": null, "path": null, "inner": null, "mapping_name": null, "delegate_unit": null},
+    {"kind": "auto", "kname": "nvme0n1p6", "uuid": "094c267a-c124-4f79-bcd7-0b43a0f51e90", "action": "ignore", "reason": "OS partition", "device": "nvme0n1p6", "volume": null, "path": null, "inner": null, "mapping_name": null, "delegate_unit": null},
+    {"kind": "auto", "kname": "nvme0n1p7", "uuid": "1348780e-16a3-4bee-bb94-78691a57fb5b", "action": "ignore", "reason": "OS partition", "device": "nvme0n1p7", "volume": null, "path": null, "inner": null, "mapping_name": null, "delegate_unit": null},
+    {"kind": "auto", "kname": "nvme0n1p8", "uuid": "095a2a0e-2f44-49b9-8b43-d16fdc7f21c2", "action": "ignore", "reason": "OS partition", "device": "nvme0n1p8", "volume": null, "path": null, "inner": null, "mapping_name": null, "delegate_unit": null}
+  ]
+}

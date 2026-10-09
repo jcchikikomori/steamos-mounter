@@ -1,0 +1,13 @@
+# synthetic: ntfs3 read-write read-back of PERSONAL on dm-0 opened under the tool's mapping name until V-11; shape of findmnt-sda1-adr-columns.json plus the MAJ:MIN column
+{
+   "filesystems": [
+      {
+         "target": "/run/media/deck/PERSONAL",
+         "source": "/dev/mapper/steamos-mounter-658207d5-5177-4a52-a297-31643c64724d",
+         "fstype": "ntfs3",
+         "vfs-options": "rw,nosuid,nodev,relatime",
+         "fs-options": "rw,uid=1000,gid=1000,dmask=0022,fmask=0022,windows_names,iocharset=utf8",
+         "maj:min": "252:0"
+      }
+   ]
+}

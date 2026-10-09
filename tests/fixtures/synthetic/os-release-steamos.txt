@@ -1,0 +1,10 @@
+# synthetic: SteamOS 3 /etc/os-release for platform detection; no Deck capture exists, so the ID and ID_LIKE lines follow the os-release(5) layout the Design Doc's Platform Seam names (ID=steamos), other values are generic
+NAME="SteamOS"
+PRETTY_NAME="SteamOS"
+VERSION_CODENAME=holo
+ID=steamos
+ID_LIKE=arch
+ANSI_COLOR="1;35"
+HOME_URL="https://www.steampowered.com/"
+LOGO=steamos
+VARIANT_ID=steamdeck

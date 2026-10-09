@@ -1,0 +1,13 @@
+# synthetic: generic vfat read-write read-back (STICK on sdc1) until V-11; option spelling as the real /esp row; shape of findmnt-sda1-adr-columns.json plus the MAJ:MIN column
+{
+   "filesystems": [
+      {
+         "target": "/run/media/deck/STICK",
+         "source": "/dev/sdc1",
+         "fstype": "vfat",
+         "vfs-options": "rw,nosuid,nodev,relatime",
+         "fs-options": "rw,uid=1000,gid=1000,fmask=0022,dmask=0022,codepage=437,iocharset=ascii,shortname=mixed,utf8,flush,errors=remount-ro",
+         "maj:min": "8:33"
+      }
+   ]
+}

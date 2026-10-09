@@ -1,0 +1,11 @@
+# synthetic: /etc/os-release of the Docker test image (python:3.14-slim, Debian 13), read with cat in the dev container; the non-SteamOS host for the exit 4 detection half
+PRETTY_NAME="Debian GNU/Linux 13 (trixie)"
+NAME="Debian GNU/Linux"
+VERSION_ID="13"
+VERSION="13 (trixie)"
+VERSION_CODENAME=trixie
+DEBIAN_VERSION_FULL=13.7
+ID=debian
+HOME_URL="https://www.debian.org/"
+SUPPORT_URL="https://www.debian.org/support"
+BUG_REPORT_URL="https://bugs.debian.org/"
