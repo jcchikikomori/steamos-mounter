@@ -1,0 +1,2 @@
+/run/media root:root 755 directory
+/run/media/deck root:root 750 directory

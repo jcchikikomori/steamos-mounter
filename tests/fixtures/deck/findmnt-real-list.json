@@ -1,0 +1,152 @@
+{
+   "filesystems": [
+      {
+         "target": "/",
+         "source": "/dev/nvme0n1p4",
+         "fstype": "btrfs",
+         "vfs-options": "rw,relatime",
+         "fs-options": "rw,ssd,discard=async,space_cache=v2,subvolid=5,subvol=/",
+         "maj:min": "0:28"
+      },{
+         "target": "/var",
+         "source": "/dev/nvme0n1p6",
+         "fstype": "ext4",
+         "vfs-options": "rw,relatime",
+         "fs-options": "rw",
+         "maj:min": "259:6"
+      },{
+         "target": "/home",
+         "source": "/dev/nvme0n1p8",
+         "fstype": "ext4",
+         "vfs-options": "rw,relatime",
+         "fs-options": "rw",
+         "maj:min": "259:8"
+      },{
+         "target": "/srv",
+         "source": "/dev/nvme0n1p8[/.steamos/offload/srv]",
+         "fstype": "ext4",
+         "vfs-options": "rw,relatime",
+         "fs-options": "rw",
+         "maj:min": "259:8"
+      },{
+         "target": "/root",
+         "source": "/dev/nvme0n1p8[/.steamos/offload/root]",
+         "fstype": "ext4",
+         "vfs-options": "rw,relatime",
+         "fs-options": "rw",
+         "maj:min": "259:8"
+      },{
+         "target": "/opt",
+         "source": "/dev/nvme0n1p8[/.steamos/offload/opt]",
+         "fstype": "ext4",
+         "vfs-options": "rw,relatime",
+         "fs-options": "rw",
+         "maj:min": "259:8"
+      },{
+         "target": "/nix",
+         "source": "/dev/nvme0n1p8[/.steamos/offload/nix]",
+         "fstype": "ext4",
+         "vfs-options": "rw,relatime",
+         "fs-options": "rw",
+         "maj:min": "259:8"
+      },{
+         "target": "/var/cache/pacman",
+         "source": "/dev/nvme0n1p8[/.steamos/offload/var/cache/pacman]",
+         "fstype": "ext4",
+         "vfs-options": "rw,relatime",
+         "fs-options": "rw",
+         "maj:min": "259:8"
+      },{
+         "target": "/var/lib/docker",
+         "source": "/dev/nvme0n1p8[/.steamos/offload/var/lib/docker]",
+         "fstype": "ext4",
+         "vfs-options": "rw,relatime",
+         "fs-options": "rw",
+         "maj:min": "259:8"
+      },{
+         "target": "/var/lib/flatpak",
+         "source": "/dev/nvme0n1p8[/.steamos/offload/var/lib/flatpak]",
+         "fstype": "ext4",
+         "vfs-options": "rw,relatime",
+         "fs-options": "rw",
+         "maj:min": "259:8"
+      },{
+         "target": "/var/lib/steamos-log-submitter",
+         "source": "/dev/nvme0n1p8[/.steamos/offload/var/lib/steamos-log-submitter]",
+         "fstype": "ext4",
+         "vfs-options": "rw,relatime",
+         "fs-options": "rw",
+         "maj:min": "259:8"
+      },{
+         "target": "/var/log",
+         "source": "/dev/nvme0n1p8[/.steamos/offload/var/log]",
+         "fstype": "ext4",
+         "vfs-options": "rw,relatime",
+         "fs-options": "rw",
+         "maj:min": "259:8"
+      },{
+         "target": "/var/lib/systemd/coredump",
+         "source": "/dev/nvme0n1p8[/.steamos/offload/var/lib/systemd/coredump]",
+         "fstype": "ext4",
+         "vfs-options": "rw,relatime",
+         "fs-options": "rw",
+         "maj:min": "259:8"
+      },{
+         "target": "/var/tmp",
+         "source": "/dev/nvme0n1p8[/.steamos/offload/var/tmp]",
+         "fstype": "ext4",
+         "vfs-options": "rw,relatime",
+         "fs-options": "rw",
+         "maj:min": "259:8"
+      },{
+         "target": "/run/media/deck/SN512",
+         "source": "/dev/mmcblk0p1",
+         "fstype": "ext4",
+         "vfs-options": "rw,nosuid,nodev,noatime",
+         "fs-options": "rw,errors=remount-ro",
+         "maj:min": "179:1"
+      },{
+         "target": "/tmp/.mount_owlcorgJ1R6Z",
+         "source": "owlcord.appimage",
+         "fstype": "fuse.owlcord.appimage",
+         "vfs-options": "ro,nosuid,nodev,relatime",
+         "fs-options": "ro,user_id=1000,group_id=1000",
+         "maj:min": "0:84"
+      },{
+         "target": "/run/media/deck/EXT256",
+         "source": "/dev/sda1",
+         "fstype": "ext4",
+         "vfs-options": "rw,nosuid,nodev,noatime",
+         "fs-options": "rw,errors=remount-ro,stripe=8191",
+         "maj:min": "8:1"
+      },{
+         "target": "/tmp/.mount_owlcorrlL949",
+         "source": "owlcord.appimage",
+         "fstype": "fuse.owlcord.appimage",
+         "vfs-options": "ro,nosuid,nodev,relatime",
+         "fs-options": "ro,user_id=1000,group_id=1000",
+         "maj:min": "0:85"
+      },{
+         "target": "/esp",
+         "source": "/dev/nvme0n1p1",
+         "fstype": "vfat",
+         "vfs-options": "rw,relatime",
+         "fs-options": "rw,fmask=0077,dmask=0077,codepage=437,iocharset=ascii,shortname=mixed,utf8,errors=remount-ro",
+         "maj:min": "259:1"
+      },{
+         "target": "/efi",
+         "source": "/dev/nvme0n1p2",
+         "fstype": "vfat",
+         "vfs-options": "rw,relatime",
+         "fs-options": "rw,fmask=0077,dmask=0077,codepage=437,iocharset=ascii,shortname=mixed,utf8,errors=remount-ro",
+         "maj:min": "259:2"
+      },{
+         "target": "/tmp/.mount_qbittoJBiLcn",
+         "source": "qbittorrentenhancededition.appimage",
+         "fstype": "fuse.qbittorrentenhancededition.appimage",
+         "vfs-options": "ro,nosuid,nodev,relatime",
+         "fs-options": "ro,user_id=1000,group_id=1000",
+         "maj:min": "0:185"
+      }
+   ]
+}

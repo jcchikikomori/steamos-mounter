@@ -1,0 +1,2 @@
+1 1000 deck -     1259   manager -    no -
+5 1000 deck seat0 125014 user    tty1 no -

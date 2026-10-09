@@ -1,0 +1,16 @@
+/sys/block/dm-0/dev=252:0
+/sys/block/dm-0/dm/name=PAT4T4SHUAWEI_PERSONAL_4_3_2024
+/sys/block/dm-0/dm/uuid=CRYPT-BITLK-PAT4T4SHUAWEI_PERSONAL_4_3_2024
+/sys/block/sdb/removable=0
+/sys/block/sda/removable=0
+/sys/block/mmcblk0/removable=0
+/sys/block/nvme0n1/removable=0
+/sys/class/block/sdb1/dev=8:17
+/sys/class/block/sdb1/partition=1
+/sys/class/block/sdb5/dev=8:21
+/sys/class/block/sdb5/partition=5
+/sys/class/block/sdb5/start=636334713
+/sys/class/block/sdb5/size=1317185352
+/sys/block/dm-0/slaves=sdb1 
+/sys/class/block/sdb1/holders=dm-0 
+/sys/class/block/sdb5/holders=

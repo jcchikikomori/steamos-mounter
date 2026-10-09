@@ -1,0 +1,11 @@
+total 0
+drwxrwxrwt  2 root root   80 Oct  8 10:09 .
+drwxrwxrwt 50 root root 1840 Oct  8 18:24 ..
+srwxrwxrwx  1 deck deck    0 Oct  8 10:09 X0
+srwxr-xr-x  1 deck deck    0 Oct  4 10:53 X1
+--- ss -xlpn (X11 listeners)
+Netid State  Recv-Q Send-Q                                                                                    Local Address:Port     Peer Address:PortProcess
+u_str LISTEN 0      4096                                                                                  /tmp/.X11-unix/X0 2205399             * 0    users:(("Xorg",pid=125118,fd=8))
+u_str LISTEN 0      4096                                                                                 @/tmp/.X11-unix/X0 2205398             * 0    users:(("Xorg",pid=125118,fd=7))
+--- /proc/<Xorg pid>/cgroup
+0::/user.slice/user-1000.slice/session-5.scope

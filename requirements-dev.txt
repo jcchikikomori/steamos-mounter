@@ -1,0 +1,6 @@
+# Dev and test tools only; the runtime is the Python standard library.
+# Exact pins: the latest stable releases that support both Python 3.11 and 3.14.
+pytest==9.1.1
+pytest-cov==7.1.0
+hypothesis==6.168.5
+ruff==0.16.10

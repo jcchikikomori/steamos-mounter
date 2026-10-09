@@ -1,0 +1,7 @@
+Id=steamos-mounter@nonexistent.service
+LoadState=not-found
+ActiveState=inactive
+SubState=dead
+InvocationID=
+Result=success
+ExecMainStatus=0

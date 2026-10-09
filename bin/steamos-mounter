@@ -1,0 +1,76 @@
+#!/usr/bin/python3 -I
+"""Canonical steamos-mounter entry point.
+
+Resolves the active release once, refuses to run as root from anything but a
+root-owned release under /opt, and hands over to the CLI.
+"""
+
+import os
+import stat
+import sys
+
+RELEASES_DIR = "/opt/steamos-mounter/releases/"
+OS_RELEASE = "/etc/os-release"
+
+
+def release_root() -> str:
+    return os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+
+
+def is_steamos() -> bool:
+    try:
+        with open(OS_RELEASE, encoding="utf-8") as handle:
+            return any(
+                line.strip() in ("ID=steamos", 'ID="steamos"') for line in handle
+            )
+    except OSError:
+        return False
+
+
+def _raise(error: OSError) -> None:
+    raise error
+
+
+def tree_is_trusted(root: str) -> bool:
+    try:
+        for dirpath, dirnames, filenames in os.walk(root, onerror=_raise):
+            entries = [dirpath]
+            entries += [os.path.join(dirpath, n) for n in (*dirnames, *filenames)]
+            for name in entries:
+                info = os.lstat(name)
+                if stat.S_ISLNK(info.st_mode) or info.st_uid != 0:
+                    return False
+                if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+                    return False
+    except OSError:
+        return False  # unreadable or vanished entry: fail closed
+    return True
+
+
+def main() -> int:
+    root = release_root()
+    if os.geteuid() == 0:
+        if not is_steamos():
+            print(
+                "steamos-mounter: unsupported platform: SteamOS only.",
+                file=sys.stderr,
+            )
+            return 4
+        if not root.startswith(RELEASES_DIR) or not tree_is_trusted(root):
+            print(
+                "steamos-mounter: refusing to run as root outside a root-owned"
+                " release in /opt/steamos-mounter. Reinstall with sudo ./install.sh.",
+                file=sys.stderr,
+            )
+            return 1
+    lib = os.path.join(root, "lib")
+    if not os.path.isdir(lib):
+        lib = os.path.join(root, "src")  # development checkout, never as root
+    sys.path.insert(0, lib)
+    from steamos_mounter.cli import main as cli_main
+
+    return cli_main(sys.argv[1:], release_root=root)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

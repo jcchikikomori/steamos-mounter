@@ -1,0 +1,5 @@
+Id=dev-sdb5.device
+Names=dev-sdb5.device
+ActiveState=active
+SubState=plugged
+SysFSPath=/sys/devices/pci0000:00/0000:00:08.1/0000:04:00.3/usb2/2-1/2-1.1/2-1.1:1.0/host1/target1:0:0/1:0:0:0/block/sdb/sdb5

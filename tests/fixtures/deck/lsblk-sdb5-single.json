@@ -1,0 +1,27 @@
+{
+   "blockdevices": [
+      {
+         "name": "sdb5",
+         "kname": "sdb5",
+         "path": "/dev/sdb5",
+         "maj:min": "8:21",
+         "type": "part",
+         "fstype": "ntfs",
+         "fsver": null,
+         "label": "MEDIABOX",
+         "uuid": "01D95F1575592A30",
+         "ptuuid": "affac936",
+         "pttype": "dos",
+         "partuuid": "affac936-05",
+         "partlabel": null,
+         "parttypename": "HPFS/NTFS/exFAT",
+         "pkname": "sdb",
+         "hotplug": true,
+         "rm": false,
+         "ro": false,
+         "tran": null,
+         "size": 674398900224,
+         "mountpoints": []
+      }
+   ]
+}

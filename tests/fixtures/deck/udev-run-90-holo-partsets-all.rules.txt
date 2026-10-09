@@ -1,0 +1,18 @@
+ENV{ID_PART_ENTRY_SCHEME}=="gpt", ENV{ID_PART_ENTRY_UUID}=="584a6949-4802-4d5a-b558-ceacc6c4852d", SYMLINK+="disk/by-partsets/all/esp", ENV{UDISKS_IGNORE}="0"
+ENV{ID_PART_ENTRY_SCHEME}=="gpt", ENV{ID_PART_ENTRY_UUID}=="97ae233c-11ec-4118-8b76-23042b95eb25", SYMLINK+="disk/by-partsets/all/efi-A", ENV{UDISKS_IGNORE}="0"
+ENV{ID_PART_ENTRY_SCHEME}=="gpt", ENV{ID_PART_ENTRY_UUID}=="84394af6-37f5-4f6d-9e46-be3ca9966ad7", SYMLINK+="disk/by-partsets/all/efi-B", ENV{UDISKS_IGNORE}="0"
+ENV{ID_PART_ENTRY_SCHEME}=="gpt", ENV{ID_PART_ENTRY_UUID}=="eb6fd94f-2112-49fb-b983-2671ba171406", SYMLINK+="disk/by-partsets/all/rootfs-A", ENV{UDISKS_IGNORE}="0"
+ENV{ID_PART_ENTRY_SCHEME}=="gpt", ENV{ID_PART_ENTRY_UUID}=="01ae6e72-9609-434f-a3cc-4c046d128206", SYMLINK+="disk/by-partsets/all/rootfs-B", ENV{UDISKS_IGNORE}="0"
+ENV{ID_PART_ENTRY_SCHEME}=="gpt", ENV{ID_PART_ENTRY_UUID}=="65f65ea0-0112-43c7-9f35-46be5c3a25b4", SYMLINK+="disk/by-partsets/all/var-A", ENV{UDISKS_IGNORE}="0"
+ENV{ID_PART_ENTRY_SCHEME}=="gpt", ENV{ID_PART_ENTRY_UUID}=="f3331961-6666-495d-8e08-7c9ab9aa8f0b", SYMLINK+="disk/by-partsets/all/var-B", ENV{UDISKS_IGNORE}="0"
+ENV{ID_PART_ENTRY_SCHEME}=="gpt", ENV{ID_PART_ENTRY_UUID}=="afc32485-4f6b-4972-a880-a6fb77f8940d", SYMLINK+="disk/by-partsets/all/home", ENV{UDISKS_IGNORE}="0"
+
+total 24
+drwxr-xr-x 2 root root  160 Oct  3 16:08 .
+drwxr-xr-x 9 root root  220 Oct  8 18:26 ..
+-rw-r--r-- 1 root root  474 Oct  3 16:08 90-holo-partsets-A.rules
+-rw-r--r-- 1 root root  474 Oct  3 16:08 90-holo-partsets-B.rules
+-rw-r--r-- 1 root root 1291 Oct  3 16:08 90-holo-partsets-all.rules
+-rw-r--r-- 1 root root  486 Oct  3 16:08 90-holo-partsets-other.rules
+-rw-r--r-- 1 root root  483 Oct  3 16:08 90-holo-partsets-self.rules
+-rw-r--r-- 1 root root  325 Oct  3 16:08 90-holo-partsets-shared.rules

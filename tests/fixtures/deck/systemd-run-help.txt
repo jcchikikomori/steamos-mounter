@@ -1,0 +1,69 @@
+> systemd-run [OPTIONS...] COMMAND [ARGUMENTS...]
+
+Run the specified command in a transient scope or service.
+
+Options:
+  -h --help                       Show this help
+     --version                    Show package version
+     --no-ask-password            Do not prompt for password
+     --user                       Run as user unit
+     --system                     Talk to the service manager (implied default)
+  -H --host=[USER@]HOST           Operate on remote host
+  -M --machine=CONTAINER          Operate on local container
+  -C --capsule=NAME               Operate on specified capsule
+     --scope                      Run this as scope rather than service
+  -u --unit=UNIT                  Run under the specified unit name
+  -p --property=NAME=VALUE        Set service or scope unit property
+     --description=TEXT           Description for unit
+     --slice=SLICE                Run in the specified slice
+     --slice-inherit              Inherit the slice from the caller
+     --expand-environment=BOOL    Control expansion of environment variables
+     --no-block                   Do not wait until operation finished
+  -r --remain-after-exit          Leave service around until explicitly stopped
+     --wait                       Wait until service stopped again
+     --send-sighup                Send SIGHUP when terminating
+     --service-type=TYPE          Service type
+     --uid=USER                   Run as system user
+     --gid=GROUP                  Run as system group
+     --nice=NICE                  Nice level
+     --working-directory=PATH     Set working directory
+  -d --same-dir                   Inherit working directory from caller
+     --root-directory=PATH        Set root directory
+  -R --same-root-dir              Inherit root directory from caller
+  -E --setenv=NAME[=VALUE]        Set environment variable
+  -t --pty                        Run service on pseudo TTY as
+                                  STDIN/STDOUT/STDERR
+  -T --pty-late                   Just like --pty, but leave TTY access to
+                                  agents until unit is started up
+  -P --pipe                       Pass STDIN/STDOUT/STDERR directly to service
+  -q --quiet                      Suppress information messages during runtime
+  -v --verbose                    Show unit logs while executing operation
+     --output=MODE                Controls formatting of verbose logs, see
+                                  journalctl for valid values
+     --json=FORMAT                Generate JSON output (pretty, short, or off)
+  -G --collect                    Unload unit after it ran, even when failed
+  -S --shell                      Invoke a $SHELL interactively
+     --job-mode=MODE              Specify how to deal with already queued jobs,
+                                  when queueing a new job
+     --ignore-failure             Ignore the exit status of the invoked process
+     --background=COLOR           Set ANSI color for background
+     --no-pager                   Do not start a pager
+
+Path options:
+     --path-property=NAME=VALUE   Set path unit property
+
+Socket options:
+     --socket-property=NAME=VALUE Set socket unit property
+
+Timer options:
+     --on-active=SECONDS          Run after SECONDS delay
+     --on-boot=SECONDS            Run SECONDS after machine was booted up
+     --on-startup=SECONDS         Run SECONDS after systemd activation
+     --on-unit-active=SECONDS     Run SECONDS after the last activation
+     --on-unit-inactive=SECONDS   Run SECONDS after the last deactivation
+     --on-calendar=SPEC           Realtime timer
+     --on-timezone-change         Run when the timezone changes
+     --on-clock-change            Run when the realtime clock jumps
+     --timer-property=NAME=VALUE  Set timer unit property
+
+See the systemd-run(1) man page for details.

@@ -1,0 +1,48 @@
+[project]
+name = "steamos-mounter"
+version = "0.1.0"
+description = "Mount external drives on SteamOS at plug-in and boot, and keep the setup through updates"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.pytest.ini_options]
+pythonpath = ["src", "."]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers --cov=steamos_mounter --cov-branch --cov-report=term-missing --cov-fail-under=95"
+markers = [
+    "rsync: needs /usr/bin/rsync (present in the Docker image)",
+    "ntfstools: needs mkntfs, ntfscp and ntfs-3g.probe (present in the Docker image)",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["steamos_mounter"]
+
+[tool.coverage.report]
+fail_under = 95
+show_missing = true
+exclude_also = ["if __name__ == .__main__.:", "if TYPE_CHECKING:", "raise NotImplementedError"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+src = ["src", "tests", "tools"]
+extend-include = ["bin/steamos-mounter"]
+extend-exclude = ["tests/fixtures"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "N", "UP", "B", "S", "BLE", "T20", "TID", "SIM", "C4", "RUF", "PERF"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"subprocess".msg = "Run external commands through steamos_mounter.runner (ADR-COMMON-0001)."
+"os.system".msg = "Run external commands through steamos_mounter.runner."
+"os.popen".msg = "Run external commands through steamos_mounter.runner."
+"shutil.which".msg = "Call tools by absolute path from the platform seam."
+"pickle".msg = "Records and the registry are JSON and TOML."
+
+[tool.ruff.lint.per-file-ignores]
+"src/steamos_mounter/runner.py" = ["TID251", "S603", "S404"]
+"src/steamos_mounter/output.py" = ["T20"]
+"bin/steamos-mounter" = ["T20"]
+"tests/**" = ["S101", "S105", "S106", "S108", "S603", "S404", "TID251"]
+"tools/**" = ["T20", "S603", "S404", "TID251"]

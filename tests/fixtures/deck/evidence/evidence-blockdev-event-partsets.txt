@@ -1,0 +1,61 @@
+#!/bin/bash
+
+set -euo pipefail
+
+declare -r PARTSETS=/efi/SteamOS/partsets/all
+
+. /usr/lib/hwsupport/common-functions
+
+usage()
+{
+    echo "Usage: $0 {add|remove} device_name (e.g. sdb1)"
+    echo "NOTE: Ignores partitions registered in ${PARTSETS}"
+    exit 1
+}
+
+is_os_partition ()
+{
+    local -r dev="/dev/${DEVBASE}"
+    local label=
+    local uuid=
+    local ignore=
+    # if lsblk errors out we have to bypass the OS partition check anyway
+    # shellcheck disable=SC2155
+    local partuuid=$(lsblk -ndo partuuid "$dev" || :)
+
+    echo "Checking if $dev is an OS partition ($partuuid) in $PARTSETS" >&2
+
+    if [ ! -r "$PARTSETS" ] || [ ! -b "$dev" ] || [ -z "$partuuid" ]
+    then
+        return 1
+    fi
+
+    # the label and ignore file entries are, in fact, unused:
+    # shellcheck disable=SC2034
+    while read -r label uuid ignore
+    do
+        if [ "$uuid" = "$partuuid" ]
+        then
+            echo "Ignoring device $dev registered in $PARTSETS" >&2
+            return 0
+        fi
+    done < "$PARTSETS"
+
+    return 1
+}
+--- common-functions create_lock_file
+40:create_lock_file()
+41-{
+42-    local DEVBASE="$1"
+43-    if [[ ! $DEVBASE =~ ^[a-z0-9]+$ ]]; then
+44-        echo "Ignoring malformed device name /dev/${DEVBASE}" >&2
+45-        return 1
+46-    fi
+47-
+48-    local MOUNT_LOCK="/var/run/jupiter-automount-${DEVBASE}.lock"
+49-    exec 9<>"$MOUNT_LOCK"
+50-    if ! flock -n 9; then
+51-        echo "Failed to obtain lock for /dev/${DEVBASE}" >&2
+52-        return 1
+53-    fi
+54-}

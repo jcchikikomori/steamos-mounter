@@ -1,0 +1,5 @@
+Id=dev-dm\x2d0.device
+Names="dev-dm\\x2d0.device"
+ActiveState=active
+SubState=plugged
+SysFSPath=/sys/devices/virtual/block/dm-0

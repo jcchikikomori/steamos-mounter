@@ -1,0 +1,10 @@
+{
+   "filesystems": [
+      {
+         "target": "/run/media/deck/EXT256",
+         "source": "/dev/sda1",
+         "fstype": "ext4",
+         "options": "rw,nosuid,nodev,noatime,errors=remount-ro,stripe=8191"
+      }
+   ]
+}

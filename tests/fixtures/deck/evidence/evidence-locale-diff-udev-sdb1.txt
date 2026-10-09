@@ -1,0 +1,9 @@
+80,82c80,82
+< DEVLINKS=/dev/disk/by-path/pci-0000:04:00.3-usb-0:1.1:1.0-scsi-0:0:0:0-part/by-partuuid/affac936-01 /dev/disk/by-id/wwn-REDACTED-part1 /dev/disk/by-path/pci-0000:04:00.3-usb-0:1.1:1.0-scsi-0:0:0:0-part1 /dev/disk/by-uuid/658207d5-5177-4a52-a297-31643c64724d /dev/disk/by-label/PAT4T4SHUAWEI\x20PERSONAL\x204\x2f3\x2f2024 /dev/disk/by-path/pci-0000:04:00.3-usb-0:1.1:1.0-scsi-0:0:0:0-part/by-uuid/658207d5-5177-4a52-a297-31643c64724d /dev/disk/by-id/usb-REDACTED-part1 /dev/disk/by-id/ata-REDACTED-part1 /dev/disk/by-diskseq/6-part1 /dev/disk/by-path/pci-0000:04:00.3-usbv3-0:1.1:1.0-scsi-0:0:0:0-part1 /dev/disk/by-partuuid/affac936-01 /dev/disk/by-path/pci-0000:04:00.3-usb-0:1.1:1.0-scsi-0:0:0:0-part/by-partnum/1 /dev/disk/by-path/pci-0000:04:00.3-usb-0:1.1:1.0-scsi-0:0:0:0-part/by-label/PAT4T4SHUAWEI\x20PERSONAL\x204\x2f3\x2f2024
+< TAGS=:seat:systemd:uaccess:
+< CURRENT_TAGS=:seat:systemd:uaccess:
+---
+> DEVLINKS=/dev/disk/by-path/pci-0000:04:00.3-usb-0:1.1:1.0-scsi-0:0:0:0-part/by-partnum/1 /dev/disk/by-diskseq/6-part1 /dev/disk/by-uuid/658207d5-5177-4a52-a297-31643c64724d /dev/disk/by-id/ata-REDACTED-part1 /dev/disk/by-path/pci-0000:04:00.3-usb-0:1.1:1.0-scsi-0:0:0:0-part1 /dev/disk/by-partuuid/affac936-01 /dev/disk/by-path/pci-0000:04:00.3-usb-0:1.1:1.0-scsi-0:0:0:0-part/by-uuid/658207d5-5177-4a52-a297-31643c64724d /dev/disk/by-id/usb-REDACTED-part1 /dev/disk/by-path/pci-0000:04:00.3-usb-0:1.1:1.0-scsi-0:0:0:0-part/by-partuuid/affac936-01 /dev/disk/by-path/pci-0000:04:00.3-usb-0:1.1:1.0-scsi-0:0:0:0-part/by-label/PAT4T4SHUAWEI\x20PERSONAL\x204\x2f3\x2f2024 /dev/disk/by-label/PAT4T4SHUAWEI\x20PERSONAL\x204\x2f3\x2f2024 /dev/disk/by-path/pci-0000:04:00.3-usbv3-0:1.1:1.0-scsi-0:0:0:0-part1 /dev/disk/by-id/wwn-REDACTED-part1
+> TAGS=:systemd:uaccess:seat:
+> CURRENT_TAGS=:systemd:uaccess:seat:
+diff rc=1

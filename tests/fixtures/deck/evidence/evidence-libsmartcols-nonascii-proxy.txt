@@ -1,0 +1,28 @@
+# column(1) uses libsmartcols like lsblk/findmnt; input row: NAME=sdx1 LABEL=M<U+00C9>DIA<U+0001>X
+## LC_ALL=C
+{
+   "table": [
+      {
+         "name": "sdx1",
+         "label": "M\\xc3\\x89DIA\u0001X"
+      }
+   ]
+}
+## LC_ALL=C (non-json table)
+0000000   N   A   M   E           L   A   B   E   L  \n   s   d   x   1
+0000020           M   \   x   c   3   \   x   8   9   D   I   A 001   X
+0000040  \n
+0000041
+## LC_ALL=C.UTF-8
+{
+   "table": [
+      {
+         "name": "sdx1",
+         "label": "MÉDIA\u0001X"
+      }
+   ]
+}
+## LC_ALL=C.UTF-8 (non-json table)
+0000000   N   A   M   E           L   A   B   E   L  \n   s   d   x   1
+0000020           M 303 211   D   I   A 001   X  \n
+0000033

@@ -1,0 +1,50 @@
+version 3.14.6 (main, Jun 15 2026, 11:36:54) [GCC 16.1.1 20260430]
+executable /usr/bin/python3
+sys.flags.isolated 1
+sys.flags.ignore_environment 1
+sys.flags.no_user_site 1
+sys.flags.safe_path True
+sys.flags.utf8_mode 1
+sys.flags.dont_write_bytecode 1
+import tomllib ok
+import subprocess ok
+import fcntl ok
+import socket ok
+import ctypes ok
+import getpass ok
+import termios ok
+import select ok
+import signal ok
+import json ok
+import logging ok
+import secrets ok
+import pwd ok
+import grp ok
+import stat ok
+import shlex ok
+import dataclasses ok
+import enum ok
+import argparse ok
+import pathlib ok
+subprocess.Popen param user True
+subprocess.Popen param group True
+subprocess.Popen param extra_groups True
+subprocess.Popen param umask True
+subprocess.Popen param process_group True
+subprocess.Popen param pipesize True
+subprocess.Popen param pass_fds True
+subprocess.Popen param start_new_session True
+os.replace True os.O_TMPFILE True os.memfd_create True
+socket.AF_UNIX True socket.SOCK_DGRAM True socket.SCM_RIGHTS True
+fcntl.flock True fcntl.LOCK_EX True fcntl.LOCK_NB True
+ctypes.CDLL(None) ok True find_library(c) libc.so.6
+tomllib.loads {'schema_version': 1, 'volume': [{'name': 'MEDIABOX', 'drivers': ['ntfs3', 'ntfs-3g', 'ntfs3:ro'], 'nosuid': True}]}
+site.ENABLE_USER_SITE False
+sys.path ['/usr/lib/python314.zip', '/usr/lib/python3.14', '/usr/lib/python3.14/lib-dynload', '/usr/lib/python3.14/site-packages']
+fs encoding utf-8 surrogateescape
+preferred encoding utf-8
+rc=0
+--- python3 -I -c (argv form)
+isolated 1 utf8_mode 1
+--- same under LANG=en_US.UTF-8 without LC_ALL (as a unit or sudo might run it)
+utf8_mode 0 preferred UTF-8

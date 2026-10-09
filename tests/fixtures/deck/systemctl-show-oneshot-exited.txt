@@ -1,0 +1,9 @@
+Id=systemd-fsck@dev-disk-by\x2dpartsets-self-efi.service
+BindsTo="dev-disk-by\\x2dpartsets-self-efi.device"
+LoadState=loaded
+ActiveState=active
+SubState=exited
+Type=oneshot
+RemainAfterExit=yes
+Result=success
+ExecMainStatus=0

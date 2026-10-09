@@ -1,0 +1,9 @@
+# file: /run/media/deck
+# owner: 0
+# group: 0
+user::rwx
+user:1000:r-x
+group::r-x
+mask::r-x
+other::---
+

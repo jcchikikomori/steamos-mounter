@@ -1,0 +1,11 @@
+{
+   "filesystems": [
+      {
+         "target": "/run/media/deck/SN512",
+         "source": "/dev/mmcblk0p1",
+         "fstype": "ext4",
+         "vfs-options": "rw,nosuid,nodev,noatime",
+         "fs-options": "rw,errors=remount-ro"
+      }
+   ]
+}

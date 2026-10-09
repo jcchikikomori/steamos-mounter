@@ -1,0 +1,15 @@
+UID=1000
+GID=1000
+Name=deck
+Timestamp=Sat 2026-10-03 16:08:26 +08
+TimestampMonotonic=7644669
+RuntimePath=/run/user/1000
+Service=user@1000.service
+Slice=user-1000.slice
+Display=5
+State=active
+Sessions=5 1
+IdleHint=no
+IdleSinceHint=0
+IdleSinceHintMonotonic=0
+Linger=yes

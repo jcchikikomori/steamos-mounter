@@ -1,0 +1,1 @@
+cat: /efi/SteamOS/partsets/all: Permission denied

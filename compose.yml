@@ -1,0 +1,21 @@
+services:
+  dev:
+    build:
+      context: .
+      args:
+        PYTHON_VERSION: "3.14"
+    image: steamos-mounter-dev:3.14
+    user: "${UID:-1000}:${GID:-1000}"
+    working_dir: /work
+    volumes:
+      - .:/work
+  floor:
+    build:
+      context: .
+      args:
+        PYTHON_VERSION: "3.11"
+    image: steamos-mounter-dev:3.11
+    user: "${UID:-1000}:${GID:-1000}"
+    working_dir: /work
+    volumes:
+      - .:/work

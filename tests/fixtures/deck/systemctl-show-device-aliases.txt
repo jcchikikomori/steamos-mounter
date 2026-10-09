@@ -1,0 +1,30 @@
+### dev-disk-by\x2duuid-01D95F1575592A30.device
+Id=dev-disk-by\x2duuid-01D95F1575592A30.device
+Following=sys-devices-pci0000:00-0000:00:08.1-0000:04:00.3-usb2-2\x2d1-2\x2d1.1-2\x2d1.1:1.0-host1-target1:0:0-1:0:0:0-block-sdb-sdb5.device
+ActiveState=active
+SubState=plugged
+SysFSPath=/sys/devices/pci0000:00/0000:00:08.1/0000:04:00.3/usb2/2-1/2-1.1/2-1.1:1.0/host1/target1:0:0/1:0:0:0/block/sdb/sdb5
+### dev-disk-by\x2duuid-658207d5\x2d5177\x2d4a52\x2da297\x2d31643c64724d.device
+Id=dev-disk-by\x2duuid-658207d5\x2d5177\x2d4a52\x2da297\x2d31643c64724d.device
+Following=sys-devices-pci0000:00-0000:00:08.1-0000:04:00.3-usb2-2\x2d1-2\x2d1.1-2\x2d1.1:1.0-host1-target1:0:0-1:0:0:0-block-sdb-sdb1.device
+ActiveState=active
+SubState=plugged
+SysFSPath=/sys/devices/pci0000:00/0000:00:08.1/0000:04:00.3/usb2/2-1/2-1.1/2-1.1:1.0/host1/target1:0:0/1:0:0:0/block/sdb/sdb1
+### dev-disk-by\x2duuid-88D48067D48058F8.device
+Id=dev-disk-by\x2duuid-88D48067D48058F8.device
+Following=sys-devices-virtual-block-dm\x2d0.device
+ActiveState=active
+SubState=plugged
+SysFSPath=/sys/devices/virtual/block/dm-0
+### sys-devices-pci0000:00-0000:00:08.1-0000:04:00.3-usb2-2\x2d1-2\x2d1.1-2\x2d1.1:1.0-host1-target1:0:0-1:0:0:0-block-sdb-sdb5.device
+Id=sys-devices-pci0000:00-0000:00:08.1-0000:04:00.3-usb2-2\x2d1-2\x2d1.1-2\x2d1.1:1.0-host1-target1:0:0-1:0:0:0-block-sdb-sdb5.device
+Following=
+ActiveState=active
+SubState=plugged
+SysFSPath=/sys/devices/pci0000:00/0000:00:08.1/0000:04:00.3/usb2/2-1/2-1.1/2-1.1:1.0/host1/target1:0:0/1:0:0:0/block/sdb/sdb5
+### sys-devices-virtual-block-dm\x2d0.device
+Id=sys-devices-virtual-block-dm\x2d0.device
+Following=
+ActiveState=active
+SubState=plugged
+SysFSPath=/sys/devices/virtual/block/dm-0
