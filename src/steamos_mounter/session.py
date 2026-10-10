@@ -1,8 +1,8 @@
-"""Is the session user at a Desktop Mode session on this seat? (logind half)
+"""Is the session user at a Desktop Mode session on this seat, and on which display?
 
 Design Doc "Key Dialog Unit" (session check), "Notifications", IP-14,
-ADR-0005 D2 and DD-19. ``check`` asks logind three questions through the
-runner, all as the caller (``loginctl show-*`` needs no privilege):
+ADR-0005 D2, DD-19 and DD-20. ``check`` asks logind three questions through
+the runner, all as the caller (``loginctl show-*`` needs no privilege):
 
 1. ``loginctl show-user <user> -p Display``: the user's primary graphical
    session; absent or empty means there is none (``NONE``).
@@ -12,18 +12,30 @@ runner, all as the caller (``loginctl show-*`` needs no privilege):
    (``SessionAllowList``), plus logind's own "in front of the user" values
    ``Active=yes``, ``Remote=no`` and ``State=active``.
 
+The key dialog (``need_display=True``) also needs the display, which logind
+leaves empty for this X11 session, so it is found through the X server:
+
+4. ``systemctl --user show-environment``, as the session user with
+   ``log_output=False``: only a ``DISPLAY=:<n>`` line is kept, every other
+   line is dropped unread (``user_manager_display``).
+5. The listener check, without ``ss`` or ``lsof``: the ``/proc/net/unix`` row
+   whose path is exactly ``/tmp/.X11-unix/X<n>``, flags ``00010000`` and state
+   ``01`` gives an inode; the one process holding ``socket:[<inode>]`` in
+   ``/proc/<pid>/fd`` is the X server (``x_listener_pid``); its
+   ``/proc/<pid>/cgroup`` must end with ``/<Scope>`` from logind
+   (``pid_in_scope``). With the platform's ``xauthority_from_xserver`` flag
+   (DD-20) the X server's ``-auth`` argument is read as well.
+
 Any doubt (a mismatch, ``Type=wayland`` in v1, an unusable session id, a
-failed query) is ``NOT_SURE``, and one NOTICE line carries the property
-values (AC-076): a missed dialog or notification is better than one in the
-wrong place.
+failed query, no ``DISPLAY``, no listener or one in another scope such as a
+stale ``X1``) is ``NOT_SURE``, and one NOTICE line carries the values (AC-076):
+a missed dialog or notification is better than one in the wrong place.
 
 A caller with a time budget passes ``deadline`` (a ``ctx.clock.monotonic()``
 time): each query then gets at most what is left of it, and once nothing is
-left no query runs and the verdict is ``NOT_SURE``.
-
-The display half (the user manager's ``DISPLAY``, the X listener in the
-session's scope, ``need_display=True``) is not built yet: asking for it raises
-``NotImplementedError``. Notifications only need the logind half (DD-19).
+left no query runs and the verdict is ``NOT_SURE``. The reading and parsing of
+steps 4 and 5 live in ``session_display`` (split by step); every ``/proc`` read
+there goes through ``HostPaths.p``.
 """
 
 import logging
@@ -37,6 +49,14 @@ from typing import TYPE_CHECKING, Final
 from steamos_mounter.journal import NOTICE
 from steamos_mounter.platforms.base import SessionAllowList
 from steamos_mounter.runner import Command, CommandResult
+from steamos_mounter.session_display import (
+    cgroup_path,
+    parse_display,
+    show_environment,
+    x_server_auth,
+)
+from steamos_mounter.session_display import pid_in_scope as pid_in_scope
+from steamos_mounter.session_display import x_listener_pid as x_listener_pid
 from steamos_mounter.systemd import parse_show
 
 if TYPE_CHECKING:
@@ -65,10 +85,12 @@ LOGIND_IN_FRONT: Final[Mapping[str, str]] = MappingProxyType(
 # A logind session id ("5", "c1"): never empty, never an option, never a path.
 SESSION_ID: Final = re.compile(r"[A-Za-z0-9]+")
 NOT_RECOGNIZED: Final = "session not recognized"
-DISPLAY_HALF_MISSING: Final = (
-    "the display half of the session check (user manager DISPLAY, X listener)"
-    " is not built yet"
-)
+
+SHOW_ENVIRONMENT: Final = "systemctl --user show-environment"
+# Detail keys of the display half, next to logind's property names.
+DISPLAY_KEY: Final = "DISPLAY"
+LISTENER_KEY: Final = "XListener"
+XAUTHORITY_KEY: Final = "XAUTHORITY"
 
 log = logging.getLogger(__name__)
 
@@ -81,7 +103,12 @@ class Verdict(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class SessionCheck:
-    """What ``check`` found. ``detail`` holds the logind values it decided on."""
+    """What ``check`` found. ``detail`` holds the values it decided on.
+
+    ``display``, ``xorg_pid`` and ``xauthority`` are set only by a
+    ``need_display=True`` check that verified them; ``xauthority`` only when
+    the platform takes it from the X server (DD-20).
+    """
 
     verdict: Verdict
     session_id: str | None
@@ -116,19 +143,25 @@ def check(
 ) -> SessionCheck:
     """The session verdict for the platform's session user and seat.
 
-    ``need_display=True`` (the key dialog) raises ``NotImplementedError``
-    until the display half lands; no Phase 3 caller asks for it. With a
-    ``deadline`` no query runs past it (``QUERY_TIMEOUT`` at most each).
+    ``need_display=True`` (the key dialog) adds steps 4 and 5; ``DESKTOP``
+    then carries the verified display and X server. With a ``deadline`` no
+    query runs past it (``QUERY_TIMEOUT`` at most each).
     """
-    if need_display:
-        raise NotImplementedError(DISPLAY_HALF_MISSING)
+    queries = _Queries(ctx, deadline)
+    found = _logind(ctx, queries)
+    if found.verdict is not Verdict.DESKTOP or not need_display:
+        return found
+    return _display(ctx, queries, found)
+
+
+def _logind(ctx: "Context", queries: "_Queries") -> SessionCheck:
+    """Steps 1 to 3: ``DESKTOP`` when logind's session matches the allow-list."""
     user_name = ctx.platform.session_user().name
     allow_list = ctx.platform.allow_list
-    queries = _Queries(ctx, deadline)
 
     user = queries.run("show-user", user_name, ("Display",))
     if not isinstance(user, dict):
-        return _unanswered(user, None, "show-user")
+        return _unanswered(user, None, "loginctl show-user")
     session_id = user["Display"]
     if not session_id:
         log.info("%s has no graphical session", user_name)
@@ -138,14 +171,14 @@ def check(
 
     seat = queries.run("show-seat", allow_list.seat, ("ActiveSession",))
     if not isinstance(seat, dict):
-        return _unanswered(seat, session_id, "show-seat")
+        return _unanswered(seat, session_id, "loginctl show-seat")
     if seat["ActiveSession"] != session_id:
         detail = {"Display": session_id, "ActiveSession": seat["ActiveSession"]}
         return _not_sure(session_id, detail, ("ActiveSession",))
 
     props = queries.run("show-session", session_id, SESSION_PROPERTIES)
     if not isinstance(props, dict):
-        return _unanswered(props, session_id, "show-session")
+        return _unanswered(props, session_id, "loginctl show-session")
     detail = {name: props[name] for name in SESSION_PROPERTIES}
     mismatched = _mismatches(detail, user_name, allow_list)
     if mismatched:
@@ -180,28 +213,92 @@ def _mismatches(
     )
 
 
+def _display(ctx: "Context", queries: "_Queries", logind: SessionCheck) -> SessionCheck:
+    """Steps 4 and 5 on top of a logind ``DESKTOP``: the verified X display."""
+    session_id = logind.session_id
+    detail = dict(logind.detail)
+    environment = queries.environment()
+    if not isinstance(environment, str):
+        return _unanswered(environment, session_id, SHOW_ENVIRONMENT)
+    display = parse_display(environment)
+    detail[DISPLAY_KEY] = display or ""
+    if display is None:
+        return _not_sure(session_id, detail, (DISPLAY_KEY,))
+    pid = x_listener_pid(ctx, int(display[1:]))
+    detail[LISTENER_KEY] = "" if pid is None else str(pid)
+    if pid is None or logind.scope is None:
+        return _not_sure(session_id, detail, (LISTENER_KEY,))
+    if not pid_in_scope(ctx, pid, logind.scope):
+        detail[LISTENER_KEY] = f"{pid} in {cgroup_path(ctx, pid) or 'no cgroup'}"
+        return _not_sure(session_id, detail, (LISTENER_KEY,))
+    xauthority = None
+    if ctx.platform.xauthority_from_xserver:
+        xauthority = x_server_auth(ctx, pid)
+        detail[XAUTHORITY_KEY] = xauthority or ""
+        if xauthority is None:
+            return _not_sure(session_id, detail, (XAUTHORITY_KEY,))
+    return SessionCheck(
+        verdict=Verdict.DESKTOP,
+        session_id=session_id,
+        scope=logind.scope,
+        display=display,
+        xorg_pid=pid,
+        xauthority=xauthority,
+        detail=MappingProxyType(detail),
+    )
+
+
+def user_manager_display(ctx: "Context") -> str | None:
+    """The session user's manager's ``DISPLAY`` (``":0"``), or None.
+
+    None when the query fails or the value is not ``:<n>``. The rest of that
+    environment is never logged (``log_output=False``) and never kept.
+    """
+    result = ctx.runner.run(show_environment(ctx, QUERY_TIMEOUT))
+    if result.returncode != 0:
+        log.debug("show-environment failed: exit %s", result.returncode)
+        return None
+    return parse_display(result.text())
+
+
 @dataclass(frozen=True, slots=True)
 class _Queries:
-    """``loginctl`` queries of one check, within its ``deadline`` (or none)."""
+    """The queries of one check, within its ``deadline`` (or none)."""
 
     ctx: "Context"
     deadline: float | None
+
+    def timeout(self) -> float | None:
+        """``QUERY_TIMEOUT``, cut to what is left; None when nothing is left."""
+        if self.deadline is None:
+            return QUERY_TIMEOUT
+        left = self.deadline - self.ctx.clock.monotonic()
+        return min(QUERY_TIMEOUT, left) if left > 0 else None
 
     def run(
         self, verb: str, name: str, props: tuple[str, ...]
     ) -> dict[str, str] | CommandResult | None:
         """``loginctl <verb> <name> -p <props>`` parsed; the result when it
         failed; None when the deadline left no time to ask."""
-        timeout = QUERY_TIMEOUT
-        if self.deadline is not None:
-            timeout = min(timeout, self.deadline - self.ctx.clock.monotonic())
-            if timeout <= 0:
-                return None
+        timeout = self.timeout()
+        if timeout is None:
+            return None
         argv = (self.ctx.platform.tools.loginctl, verb, name, "-p", ",".join(props))
         result = self.ctx.runner.run(Command(argv=argv, timeout=timeout))
         if result.returncode != 0:
             return result
         return parse_props(result.text())
+
+    def environment(self) -> str | CommandResult | None:
+        """``show-environment`` output; the result when it failed; None when
+        the deadline left no time to ask."""
+        timeout = self.timeout()
+        if timeout is None:
+            return None
+        result = self.ctx.runner.run(show_environment(self.ctx, timeout))
+        if result.returncode != 0:
+            return result
+        return result.text()
 
 
 def _verdict(
@@ -233,22 +330,23 @@ def _not_sure(
 
 
 def _unanswered(
-    result: CommandResult | None, session_id: str | None, verb: str
+    result: CommandResult | None, session_id: str | None, label: str
 ) -> SessionCheck:
     """``NOT_SURE`` for a query that failed, or that the deadline left unasked."""
     if result is not None:
-        return _failed(result, session_id)
-    log.log(NOTICE, "%s: no time left for loginctl %s", NOT_RECOGNIZED, verb)
+        return _failed(result, session_id, label)
+    log.log(NOTICE, "%s: no time left for %s", NOT_RECOGNIZED, label)
     return _verdict(Verdict.NOT_SURE, session_id, {})
 
 
-def _failed(result: CommandResult, session_id: str | None) -> SessionCheck:
-    command = " ".join(result.argv[1:3])
+def _failed(result: CommandResult, session_id: str | None, label: str) -> SessionCheck:
+    # show-environment output is the user's environment: never logged, and
+    # stderr of a failed query carries none of it.
     log.log(
         NOTICE,
-        "%s: loginctl %s failed: exit %s, timed out %s, not found %s: %s",
+        "%s: %s failed: exit %s, timed out %s, not found %s: %s",
         NOT_RECOGNIZED,
-        command,
+        label,
         result.returncode,
         result.timed_out,
         result.not_found,

@@ -101,7 +101,7 @@ def sweep(
 def _run(
     ctx: "Context", kind: InstanceKind, device_path: str, svc: ServiceResult | None
 ) -> TeardownReport:
-    instance = _locate(ctx, kind, device_path)
+    instance = locate(ctx, kind, device_path)
     if instance is None:
         return owns_nothing(device_path, svc)
     with locks.volume_lock(ctx, instance.lock_key, timeout=LOCK_WAIT):
@@ -125,7 +125,11 @@ def _run(
 # --- which record --------------------------------------------------------------------
 
 
-def _locate(ctx: "Context", kind: InstanceKind, device_path: str) -> Instance | None:
+def locate(ctx: "Context", kind: InstanceKind, device_path: str) -> Instance | None:
+    """This instance's record key and lock key (I007); None: no auto record.
+
+    Also used by ``unit_entry``'s top-level catch to record ``internal_error``.
+    """
     tail = device_path.rpartition("/")[2]
     if kind is InstanceKind.REGISTERED:
         key = tail.lower()

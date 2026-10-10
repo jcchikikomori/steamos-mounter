@@ -39,6 +39,7 @@ from steamos_mounter import state
 from steamos_mounter.journal import fields
 from steamos_mounter.model import VolumeState
 from steamos_mounter.runner import Command
+from steamos_mounter.session_display import user_manager_env
 
 if TYPE_CHECKING:
     from steamos_mounter.context import Context
@@ -146,10 +147,7 @@ def send(ctx: "Context", notice: Notice, *, deadline: float | None = None) -> bo
     command = Command(
         argv=argv,
         timeout=timeout,
-        env_extra={
-            "XDG_RUNTIME_DIR": user.runtime_dir,
-            "DBUS_SESSION_BUS_ADDRESS": user.bus_address,
-        },
+        env_extra=user_manager_env(user),
         user=user.uid,
         group=user.gid,
     )

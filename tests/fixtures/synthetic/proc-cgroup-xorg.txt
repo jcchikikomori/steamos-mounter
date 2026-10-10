@@ -1,0 +1,2 @@
+# synthetic: /proc/<Xorg pid>/cgroup as printed on the Deck (deck/session-x11.txt): the X server of logind session 5 sits in session-5.scope
+0::/user.slice/user-1000.slice/session-5.scope

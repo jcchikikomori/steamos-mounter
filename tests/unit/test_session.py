@@ -1,7 +1,7 @@
-"""The logind half of ``session.check`` and the ``parse_props`` parser.
+"""``session.check`` (logind and display halves) and its parsers.
 
-Design Doc "Key Dialog Unit" (session check steps 1 to 3 and 6), IP-14,
-ADR-0005 D2 and DD-19. Every test runs the real code over the Deck's
+Design Doc "Key Dialog Unit" (session check steps 1 to 6), IP-14, ADR-0005
+D2, DD-19 and DD-20. Every test runs the real code over the Deck's
 ``loginctl`` captures through the fake runner:
 
 - ``loginctl-user-deck-display.txt``: ``Display=5``;
@@ -12,8 +12,15 @@ ADR-0005 D2 and DD-19. Every test runs the real code over the Deck's
   is absent instead of empty (absent equals empty);
 - ``loginctl-session-wayland.txt`` (synthetic): the same session as Wayland.
 
-Only the full allow-list match is ``DESKTOP``; any doubt is ``NOT_SURE`` and
-the property values reach the journal (AC-076).
+The display half (``need_display=True``) adds ``systemctl --user
+show-environment`` through the fake runner and real ``/proc`` files under
+``tmp_path`` (``tests/helpers/proc_tree.py``): the synthetic
+``proc-net-unix-x0-listening.txt`` (X0 listener inode 2205399, abstract row
+2205398, no ``X1`` listener), ``proc-cgroup-xorg.txt`` and
+``proc-cgroup-other-scope.txt``.
+
+Only the full allow-list match with a verified display is ``DESKTOP``; any
+doubt is ``NOT_SURE`` and the values reach the journal (AC-076).
 """
 
 import dataclasses
@@ -21,10 +28,21 @@ import logging
 
 import pytest
 
-from steamos_mounter import session
+from steamos_mounter import session, session_display
 from steamos_mounter.session import SessionCheck, Verdict, check, parse_props
 from tests.helpers.fake_runner import Answer
 from tests.helpers.fixtures import load_fixture
+from tests.helpers.proc_tree import (
+    OTHER_SCOPE_CGROUP_FIXTURE,
+    X0_INODE,
+    XORG_AUTH,
+    XORG_CMDLINE,
+    XORG_PID,
+    ProcTree,
+    socket_link,
+    unix_row,
+    unix_table,
+)
 
 LOGINCTL = "/usr/bin/loginctl"
 USER_CAPTURE = "loginctl-user-deck-display.txt"
@@ -380,16 +398,6 @@ def test_session_module_holds_no_allow_list_values():
         assert value not in text
 
 
-# --- check: the display half is not built yet --------------------------------------
-
-
-def test_need_display_raises_until_the_display_half_lands(ctx, fake_runner):
-    with pytest.raises(NotImplementedError, match="display"):
-        check(ctx, need_display=True)
-
-    assert fake_runner.calls == []
-
-
 # --- check: the time budget (a deadline on ctx.clock.monotonic()) ---------------------
 
 
@@ -448,3 +456,609 @@ def test_a_deadline_passing_between_queries_stops_the_check(
     assert [r.getMessage() for r in caplog.records] == [
         "session not recognized: no time left for loginctl show-seat"
     ]
+
+
+# --- the display half: user manager DISPLAY and the X listener (steps 4 and 5) --------
+
+SYSTEMCTL = "/usr/bin/systemctl"
+SHOW_ENVIRONMENT = (SYSTEMCTL, "--user", "show-environment")
+SESSION_ENV = {
+    "XDG_RUNTIME_DIR": "/run/user/1000",
+    "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus",
+}
+# What a user manager holds after a Game Mode -> Desktop Mode switch (ADR-0005
+# Device Facts), plus a value that must never be kept or logged.
+MANAGER_ENVIRONMENT = (
+    "HOME=/home/deck\n"
+    "LANG=en_US.UTF-8\n"
+    "DISPLAY=:0\n"
+    "QT_QPA_PLATFORM=xcb\n"
+    "XDG_SESSION_TYPE=x11\n"
+    "PRIVATE_TOKEN=tok-5f1e-never-logged\n"
+)
+PRIVATE_VALUE = "tok-5f1e-never-logged"
+X0_PATH = "/tmp/.X11-unix/X0"
+
+
+@pytest.fixture
+def proc(tmp_path) -> ProcTree:
+    return ProcTree(tmp_path)
+
+
+def environment(*lines: str) -> Answer:
+    return answer("".join(f"{line}\n" for line in lines))
+
+
+def script_display(
+    fake_runner,
+    *,
+    env: Answer | None = None,
+    session_props: Answer | str = SESSION_CAPTURE,
+) -> None:
+    script_deck(fake_runner, session_props=session_props)
+    fake_runner.on(SHOW_ENVIRONMENT, env or answer(MANAGER_ENVIRONMENT))
+
+
+def with_xauthority_flag(ctx):
+    return dataclasses.replace(
+        ctx, platform=dataclasses.replace(ctx.platform, xauthority_from_xserver=True)
+    )
+
+
+def check_display(ctx):
+    return check(ctx, need_display=True)
+
+
+def test_desktop_with_x0_listener_in_the_session_scope(ctx, fake_runner, proc):
+    proc.desktop()
+    script_display(fake_runner)
+
+    result = check_display(ctx)
+
+    assert result.verdict is Verdict.DESKTOP
+    assert result.session_id == "5"
+    assert result.scope == "session-5.scope"
+    assert result.display == ":0"
+    assert result.xorg_pid == XORG_PID
+    assert result.xauthority is None
+    assert result.detail["DISPLAY"] == ":0"
+    assert result.detail["XListener"] == str(XORG_PID)
+
+
+def test_show_environment_runs_after_logind_as_the_session_user_unlogged(
+    ctx, fake_runner, proc
+):
+    proc.desktop()
+    script_display(fake_runner)
+
+    check_display(ctx)
+
+    assert fake_runner.argvs == [SHOW_USER, SHOW_SEAT, SHOW_SESSION, SHOW_ENVIRONMENT]
+    call = fake_runner.calls[-1]
+    assert (call.user, call.group) == (1000, 1000)
+    assert call.env_extra == SESSION_ENV
+    assert call.log_output is False
+    assert not call.secret_stdout
+    assert not call.has_stdin
+    assert call.timeout == 10.0
+
+
+def test_environment_is_filtered_to_display(ctx, fake_runner, proc, caplog):
+    proc.desktop()
+    script_display(fake_runner)
+
+    with caplog.at_level(logging.DEBUG):
+        result = check_display(ctx)
+
+    assert "DISPLAY" in result.detail
+    assert not {"HOME", "LANG", "QT_QPA_PLATFORM", "PRIVATE_TOKEN"} & set(result.detail)
+    assert PRIVATE_VALUE not in repr(result)
+    assert PRIVATE_VALUE not in caplog.text
+
+
+def test_environment_is_not_logged_when_the_check_is_not_sure(
+    ctx, fake_runner, proc, caplog
+):
+    proc.net_unix()  # no X server process: the check fails after reading DISPLAY
+    script_display(fake_runner)
+
+    with caplog.at_level(logging.DEBUG):
+        result = check_display(ctx)
+
+    assert result.verdict is Verdict.NOT_SURE
+    assert PRIVATE_VALUE not in caplog.text
+    assert "HOME" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "lines",
+    [
+        ("HOME=/home/deck",),
+        ("DISPLAY=",),
+        ("DISPLAY=:0.0",),
+        ("DISPLAY=localhost:0",),
+        ("DISPLAY=:00",),
+        ("DISPLAY=:",),
+        ("DISPLAY=:0 ",),
+        ("DISPLAY=wayland-0",),
+        ("WAYLAND_DISPLAY=wayland-0",),
+    ],
+)
+def test_no_usable_display_is_not_sure(ctx, fake_runner, proc, caplog, lines):
+    proc.desktop()
+    script_display(fake_runner, env=environment(*lines))
+
+    with caplog.at_level(logging.DEBUG, logger=LOGGER):
+        result = check_display(ctx)
+
+    assert result.verdict is Verdict.NOT_SURE
+    assert result.display is None
+    assert result.detail["DISPLAY"] == ""
+    notices = [r.getMessage() for r in caplog.records if r.levelname == "NOTICE"]
+    assert len(notices) == 1
+    assert "DISPLAY did not match" in notices[0]
+    assert "Scope='session-5.scope'" in notices[0]
+
+
+def test_stale_x1_display_without_a_listener_is_not_sure(
+    ctx, fake_runner, proc, caplog
+):
+    proc.desktop()
+    script_display(fake_runner, env=environment("DISPLAY=:1"))
+
+    with caplog.at_level(logging.DEBUG, logger=LOGGER):
+        result = check_display(ctx)
+
+    assert result.verdict is Verdict.NOT_SURE
+    assert result.xorg_pid is None
+    assert result.detail["DISPLAY"] == ":1"
+    assert result.detail["XListener"] == ""
+    journal = "\n".join(caplog.messages)
+    assert "XListener did not match" in journal
+    assert "DISPLAY=':1'" in journal
+
+
+def test_x1_listener_outside_the_session_scope_is_not_sure(
+    ctx, fake_runner, proc, caplog
+):
+    x1_row = unix_row(3100001, "/tmp/.X11-unix/X1")
+    proc.net_unix(load_fixture("proc-net-unix-x0-listening.txt").decode() + x1_row)
+    proc.xorg()
+    other = load_fixture(OTHER_SCOPE_CGROUP_FIXTURE).decode()
+    proc.process(5151, fds={3: socket_link(3100001)}, cgroup=other)
+    script_display(fake_runner, env=environment("DISPLAY=:1"))
+
+    with caplog.at_level(logging.DEBUG, logger=LOGGER):
+        result = check_display(ctx)
+
+    assert result.verdict is Verdict.NOT_SURE
+    assert result.detail["XListener"].startswith("5151 in ")
+    assert "session-3.scope" in "\n".join(caplog.messages)
+
+
+def test_x0_listener_in_another_scope_is_not_sure(ctx, fake_runner, proc):
+    proc.net_unix()
+    proc.xorg(cgroup_fixture=OTHER_SCOPE_CGROUP_FIXTURE)
+    script_display(fake_runner)
+
+    result = check_display(ctx)
+
+    assert result.verdict is Verdict.NOT_SURE
+    assert result.detail["XListener"] == (
+        f"{XORG_PID} in /user.slice/user-1000.slice/session-3.scope"
+    )
+
+
+def test_listener_without_a_cgroup_file_is_not_sure(ctx, fake_runner, proc):
+    proc.net_unix()
+    proc.process(XORG_PID, fds={7: socket_link(X0_INODE)})
+    script_display(fake_runner)
+
+    result = check_display(ctx)
+
+    assert result.verdict is Verdict.NOT_SURE
+    assert result.detail["XListener"] == f"{XORG_PID} in no cgroup"
+
+
+def test_wayland_session_is_not_sure_before_any_display_query(ctx, fake_runner, proc):
+    proc.desktop()
+    script_deck(fake_runner, session_props=wayland_answer())
+
+    result = check_display(ctx)
+
+    assert result.verdict is Verdict.NOT_SURE
+    assert SHOW_ENVIRONMENT not in fake_runner.argvs
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("Name", "root"),
+        ("Seat", "seat1"),
+        ("Active", "no"),
+        ("Remote", "yes"),
+        ("Class", "greeter"),
+        ("State", "online"),
+        ("Desktop", "gamescope"),
+        ("Type", "wayland"),
+    ],
+)
+def test_each_property_mismatch_stops_before_the_display_half(
+    ctx, fake_runner, proc, name, value
+):
+    proc.desktop()
+    text = with_property(capture_text(SESSION_CAPTURE), name, value)
+    script_deck(fake_runner, session_props=answer(text))
+
+    result = check_display(ctx)
+
+    assert result.verdict is Verdict.NOT_SURE
+    assert result.display is None
+    assert fake_runner.argvs == [SHOW_USER, SHOW_SEAT, SHOW_SESSION]
+
+
+def test_no_session_needs_no_display_query(ctx, fake_runner):
+    fake_runner.on(SHOW_USER, answer("Display=\n"))
+
+    result = check_display(ctx)
+
+    assert result.verdict is Verdict.NONE
+    assert fake_runner.argvs == [SHOW_USER]
+
+
+def test_empty_scope_is_not_sure(ctx, fake_runner, proc):
+    proc.desktop()
+    text = with_property(capture_text(SESSION_CAPTURE), "Scope", "")
+    script_display(fake_runner, session_props=answer(text))
+
+    result = check_display(ctx)
+
+    assert result.verdict is Verdict.NOT_SURE
+    assert result.xorg_pid is None
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        Answer(returncode=1, stderr=b"Failed to connect to bus: No medium found"),
+        Answer.timeout(),
+        Answer.missing(),
+    ],
+)
+def test_failed_show_environment_is_not_sure(ctx, fake_runner, proc, caplog, failure):
+    proc.desktop()
+    script_display(fake_runner, env=failure)
+
+    with caplog.at_level(logging.DEBUG, logger=LOGGER):
+        result = check_display(ctx)
+
+    assert result.verdict is Verdict.NOT_SURE
+    assert result.session_id == "5"
+    notices = [r.getMessage() for r in caplog.records if r.levelname == "NOTICE"]
+    assert len(notices) == 1
+    assert "systemctl --user show-environment failed" in notices[0]
+
+
+def test_display_check_without_the_proc_table_is_not_sure(ctx, fake_runner):
+    script_display(fake_runner)
+
+    result = check_display(ctx)
+
+    assert result.verdict is Verdict.NOT_SURE
+    assert result.detail["XListener"] == ""
+
+
+def test_need_display_false_reads_no_environment_and_no_proc(ctx, fake_runner, proc):
+    proc.desktop()
+    script_deck(fake_runner)
+
+    result = check(ctx, need_display=False)
+
+    assert result.verdict is Verdict.DESKTOP
+    assert result.display is None
+    assert SHOW_ENVIRONMENT not in fake_runner.argvs
+
+
+# --- the display half: XAUTHORITY from the X server (DD-20) -----------------------
+
+
+def test_xauthority_is_read_from_xorg_only_with_the_platform_flag(
+    ctx, fake_runner, proc
+):
+    proc.desktop()
+    script_display(fake_runner)
+
+    result = check_display(with_xauthority_flag(ctx))
+
+    assert result.verdict is Verdict.DESKTOP
+    assert result.xauthority == XORG_AUTH
+    assert result.detail["XAUTHORITY"] == XORG_AUTH
+
+
+def test_xauthority_stays_unset_without_the_flag(ctx, fake_runner, proc):
+    proc.desktop()
+    script_display(fake_runner)
+
+    result = check_display(ctx)
+
+    assert result.xauthority is None
+    assert "XAUTHORITY" not in result.detail
+
+
+@pytest.mark.parametrize(
+    "cmdline",
+    [
+        ("/usr/lib/Xorg", "-seat", "seat0", "vt1"),
+        ("/usr/lib/Xorg", "-auth"),
+        ("/usr/lib/Xorg", "-auth", "xauth_relative"),
+        (),
+    ],
+)
+def test_flag_without_a_usable_auth_argument_is_not_sure(
+    ctx, fake_runner, proc, cmdline
+):
+    proc.net_unix()
+    proc.xorg(cmdline=cmdline)
+    script_display(fake_runner)
+
+    result = check_display(with_xauthority_flag(ctx))
+
+    assert result.verdict is Verdict.NOT_SURE
+    assert result.xauthority is None
+    assert result.detail["XAUTHORITY"] == ""
+
+
+def test_flag_with_an_unreadable_cmdline_is_not_sure(ctx, fake_runner, proc):
+    proc.net_unix()
+    proc.process(
+        XORG_PID,
+        fds={7: socket_link(X0_INODE)},
+        cgroup="0::/user.slice/user-1000.slice/session-5.scope\n",
+    )
+    script_display(fake_runner)
+
+    result = check_display(with_xauthority_flag(ctx))
+
+    assert result.verdict is Verdict.NOT_SURE
+
+
+# --- the display half: the time budget ----------------------------------------------
+
+
+def test_show_environment_takes_at_most_what_is_left(
+    ctx, fake_runner, fake_clock, proc
+):
+    proc.desktop()
+    fake_runner.on(SHOW_USER, USER_CAPTURE, hook=lambda _c: fake_clock.advance(3))
+    fake_runner.on(SHOW_SEAT, SEAT_CAPTURE, hook=lambda _c: fake_clock.advance(3))
+    fake_runner.on(
+        (LOGINCTL, "show-session"),
+        SESSION_CAPTURE,
+        hook=lambda _c: fake_clock.advance(3),
+    )
+    fake_runner.on(SHOW_ENVIRONMENT, answer(MANAGER_ENVIRONMENT))
+
+    result = check(ctx, need_display=True, deadline=fake_clock.monotonic() + 12)
+
+    assert result.verdict is Verdict.DESKTOP
+    assert [call.timeout for call in fake_runner.calls] == [10.0, 9.0, 6.0, 3.0]
+
+
+def test_no_time_left_for_show_environment_is_not_sure(
+    ctx, fake_runner, fake_clock, proc, caplog
+):
+    proc.desktop()
+    fake_runner.on(SHOW_USER, USER_CAPTURE)
+    fake_runner.on(SHOW_SEAT, SEAT_CAPTURE)
+    fake_runner.on(
+        (LOGINCTL, "show-session"),
+        SESSION_CAPTURE,
+        hook=lambda _c: fake_clock.advance(5),
+    )
+
+    with caplog.at_level(logging.DEBUG, logger=LOGGER):
+        result = check(ctx, need_display=True, deadline=fake_clock.monotonic() + 5)
+
+    assert result.verdict is Verdict.NOT_SURE
+    assert SHOW_ENVIRONMENT not in fake_runner.argvs
+    assert [r.getMessage() for r in caplog.records] == [
+        "session not recognized: no time left for systemctl --user show-environment"
+    ]
+
+
+# --- user_manager_display ------------------------------------------------------------
+
+
+def test_user_manager_display_keeps_only_display(ctx, fake_runner):
+    fake_runner.on(SHOW_ENVIRONMENT, answer(MANAGER_ENVIRONMENT))
+
+    assert session.user_manager_display(ctx) == ":0"
+    [call] = fake_runner.calls
+    assert call.log_output is False
+    assert (call.user, call.group, call.env_extra) == (1000, 1000, SESSION_ENV)
+    assert call.timeout == 10.0
+
+
+@pytest.mark.parametrize(
+    "result", [Answer(returncode=1), Answer.timeout(), Answer.missing()]
+)
+def test_user_manager_display_is_none_when_the_query_fails(ctx, fake_runner, result):
+    fake_runner.on(SHOW_ENVIRONMENT, result)
+
+    assert session.user_manager_display(ctx) is None
+
+
+def test_user_manager_display_takes_the_first_display_line(ctx, fake_runner):
+    fake_runner.on(SHOW_ENVIRONMENT, environment("DISPLAY=:7", "DISPLAY=:0"))
+
+    assert session.user_manager_display(ctx) == ":7"
+
+
+# --- x_listener_pid ------------------------------------------------------------------
+
+
+def test_x0_listener_is_the_xorg_pid_from_the_synthetic_table(ctx, proc):
+    proc.desktop()
+
+    assert session.x_listener_pid(ctx, 0) == XORG_PID
+
+
+def test_x1_has_no_listener_in_the_synthetic_table(ctx, proc):
+    proc.desktop()
+
+    assert session.x_listener_pid(ctx, 1) is None
+
+
+def test_abstract_socket_alone_is_no_listener(ctx, proc):
+    proc.net_unix(unix_table(unix_row(2205398, "@/tmp/.X11-unix/X0")))
+    proc.process(XORG_PID, fds={6: socket_link(2205398)})
+
+    assert session.x_listener_pid(ctx, 0) is None
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        # accepted connection: no listening flag, state 03
+        unix_row(X0_INODE, X0_PATH, flags="00000000", state="03"),
+        # listening flag but not state 01
+        unix_row(X0_INODE, X0_PATH, state="03"),
+        # state 01 without the listening flag (bound, not listening)
+        unix_row(X0_INODE, X0_PATH, flags="00000000"),
+        # a longer path that starts the same
+        unix_row(X0_INODE, f"{X0_PATH}0"),
+        # no path at all
+        unix_row(X0_INODE),
+    ],
+)
+def test_only_an_exact_listening_row_counts(ctx, proc, row):
+    proc.net_unix(unix_table(row))
+    proc.process(XORG_PID, fds={7: socket_link(X0_INODE)})
+
+    assert session.x_listener_pid(ctx, 0) is None
+
+
+def test_x1_does_not_match_an_x10_listener(ctx, proc):
+    proc.net_unix(unix_table(unix_row(3100010, "/tmp/.X11-unix/X10")))
+    proc.process(5000, fds={3: socket_link(3100010)})
+
+    assert session.x_listener_pid(ctx, 1) is None
+    assert session.x_listener_pid(ctx, 10) == 5000
+
+
+def test_two_listening_rows_for_one_path_are_doubt(ctx, proc):
+    proc.net_unix(unix_table(unix_row(X0_INODE, X0_PATH), unix_row(2209999, X0_PATH)))
+    proc.process(XORG_PID, fds={7: socket_link(X0_INODE)})
+
+    assert session.x_listener_pid(ctx, 0) is None
+
+
+def test_listener_held_by_no_process_is_none(ctx, proc):
+    proc.net_unix()
+    proc.process(4300, fds={3: socket_link(2207110)})
+
+    assert session.x_listener_pid(ctx, 0) is None
+
+
+def test_listener_held_by_two_processes_is_doubt(ctx, proc):
+    proc.desktop()
+    proc.process(4243, fds={9: socket_link(X0_INODE)})
+
+    assert session.x_listener_pid(ctx, 0) is None
+
+
+def test_unreadable_process_entries_are_skipped(ctx, proc):
+    proc.desktop()
+    proc.path("/proc/77").mkdir()  # no fd directory: a process that went away
+    fd_dir = proc.process(78)
+    (fd_dir / "fd" / "5").write_text("not a link")  # readlink fails
+    proc.path("/proc/self").mkdir()  # not a pid
+
+    assert session.x_listener_pid(ctx, 0) == XORG_PID
+
+
+def test_missing_proc_table_is_none(ctx):
+    assert session.x_listener_pid(ctx, 0) is None
+
+
+def test_proc_table_without_a_proc_listing_is_none(ctx, proc):
+    proc.desktop()
+    listing = proc.path("/proc")
+    listing.chmod(0o311)  # searchable, not listable: the table reads, the scan fails
+    try:
+        found = session.x_listener_pid(ctx, 0)
+    finally:
+        listing.chmod(0o755)
+
+    assert found is None
+
+
+# --- pid_in_scope --------------------------------------------------------------------
+
+
+def test_xorg_cgroup_fixture_is_in_session_5_scope(ctx, proc):
+    proc.xorg()
+
+    assert session.pid_in_scope(ctx, XORG_PID, "session-5.scope") is True
+
+
+def test_other_scope_fixture_is_not_in_session_5_scope(ctx, proc):
+    proc.xorg(cgroup_fixture=OTHER_SCOPE_CGROUP_FIXTURE)
+
+    assert session.pid_in_scope(ctx, XORG_PID, "session-5.scope") is False
+
+
+@pytest.mark.parametrize(
+    ("cgroup", "scope"),
+    [
+        ("0::/user.slice/user-1000.slice/session-15.scope\n", "session-5.scope"),
+        # the last element only ends with the scope name
+        ("0::/user.slice/user-1000.slice/app-session-5.scope\n", "session-5.scope"),
+        ("0::/user.slice/user-1000.slice/session-5.scope/extra\n", "session-5.scope"),
+        (
+            "1:name=systemd:/user.slice/user-1000.slice/session-5.scope\n",
+            "session-5.scope",
+        ),
+        ("", "session-5.scope"),
+        ("0::/user.slice/user-1000.slice/session-5.scope\n", ""),
+        (
+            "0::/user.slice/user-1000.slice/session-5.scope\n",
+            "user-1000.slice/session-5.scope",
+        ),
+    ],
+)
+def test_scope_must_be_the_last_path_element_of_the_v2_line(ctx, proc, cgroup, scope):
+    proc.process(XORG_PID, cgroup=cgroup)
+
+    assert session.pid_in_scope(ctx, XORG_PID, scope) is False
+
+
+def test_hybrid_cgroup_file_uses_the_unified_line(ctx, proc):
+    proc.process(
+        XORG_PID,
+        cgroup=(
+            "1:name=systemd:/user.slice/user-1000.slice/session-3.scope\n"
+            "0::/user.slice/user-1000.slice/session-5.scope\n"
+        ),
+    )
+
+    assert session.pid_in_scope(ctx, XORG_PID, "session-5.scope") is True
+
+
+def test_missing_process_is_not_in_scope(ctx):
+    assert session.pid_in_scope(ctx, 99999, "session-5.scope") is False
+
+
+# --- x_server_auth -------------------------------------------------------------------
+
+
+def test_x_server_auth_reads_the_auth_argument(ctx, proc):
+    proc.xorg()
+
+    assert session_display.x_server_auth(ctx, XORG_PID) == XORG_AUTH
+
+
+def test_x_server_auth_without_the_option_is_none(ctx, proc):
+    proc.xorg(cmdline=XORG_CMDLINE[:8])
+
+    assert session_display.x_server_auth(ctx, XORG_PID) is None

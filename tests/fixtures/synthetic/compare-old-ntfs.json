@@ -1,0 +1,12 @@
+# synthetic: EVP-2 old-behaviour baseline until task 52 captures it: dirty.img on a loop device mounted by hand with `mount -t ntfs` (mount.ntfs is ntfs-3g, so fuseblk) at /run/smt-old, no options; columns of findmnt-sda1-adr-columns.json
+{
+   "filesystems": [
+      {
+         "target": "/run/smt-old",
+         "source": "/dev/loop0",
+         "fstype": "fuseblk",
+         "vfs-options": "rw,relatime",
+         "fs-options": "rw,user_id=0,group_id=0,allow_other,blksize=4096"
+      }
+   ]
+}

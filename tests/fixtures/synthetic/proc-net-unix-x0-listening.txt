@@ -1,0 +1,9 @@
+# synthetic: /proc/net/unix on the Deck in Desktop Mode, built from deck/session-x11.txt (ss -xlpn: Xorg listens on /tmp/.X11-unix/X0 inode 2205399 and on the abstract @/tmp/.X11-unix/X0 inode 2205398; X1 is a stale socket file with no listener, so it has no row); accepted X0 connections (flags 0, state 03) and two unrelated sockets added in the kernel's row format
+Num       RefCount Protocol Flags    Type St Inode Path
+0000000000000000: 00000002 00000000 00010000 0001 01 18512 /run/dbus/system_bus_socket
+0000000000000000: 00000002 00000000 00010000 0001 01 2205398 @/tmp/.X11-unix/X0
+0000000000000000: 00000002 00000000 00010000 0001 01 2205399 /tmp/.X11-unix/X0
+0000000000000000: 00000003 00000000 00000000 0001 03 2207110 /tmp/.X11-unix/X0
+0000000000000000: 00000003 00000000 00000000 0001 03 2207114 @/tmp/.X11-unix/X0
+0000000000000000: 00000003 00000000 00000000 0001 03 2207120
+0000000000000000: 00000002 00000000 00010000 0001 01 2201877 /run/user/1000/bus

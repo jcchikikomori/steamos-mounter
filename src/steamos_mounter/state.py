@@ -112,10 +112,10 @@ def compute_views(
     registered: list[VolumeView] = []
     if not isinstance(registry, RegistryError):
         registered = [
-            _registered_view(ctx, volume, tree, table)
+            registered_view(ctx, volume, tree, table)
             for volume in sorted(registry.volumes, key=_volume_name)
         ]
-    auto = [_auto_view(ctx, record, tree, table) for record in _auto_records(ctx)]
+    auto = [auto_view(ctx, record, tree, table) for record in auto_records(ctx)]
     return registered + sorted(auto, key=_view_path)
 
 
@@ -127,9 +127,10 @@ def _view_path(view: VolumeView) -> tuple[str, str]:
     return (view.path or "", view.name)
 
 
-def _registered_view(
+def registered_view(
     ctx: "Context", volume: Volume, tree: DeviceTree, table: Sequence[MountInfo]
 ) -> VolumeView:
+    """The view of one registered volume (``list``, ``mount``'s final line)."""
     devices = tree.by_uuid(volume.uuid)
     found = load_record(ctx, InstanceKind.REGISTERED, volume.uuid)
     record = found if isinstance(found, Record) else None
@@ -145,9 +146,10 @@ def _registered_view(
     return _view(ctx, facts, record, table)
 
 
-def _auto_view(
+def auto_view(
     ctx: "Context", record: Record, tree: DeviceTree, table: Sequence[MountInfo]
 ) -> VolumeView:
+    """The view of the auto volume ``record`` belongs to."""
     kname, _, devnum = record.key.rpartition(_KEY_DEVNUM_SEPARATOR)
     device = tree.devices.get(kname)
     present = device is not None and device.devnum == devnum.replace("_", ":")
@@ -167,7 +169,8 @@ def _auto_view(
     return _view(ctx, facts, record, table)
 
 
-def _auto_records(ctx: "Context") -> Iterator[Record]:
+def auto_records(ctx: "Context") -> Iterator[Record]:
+    """Every readable auto record, by file name; unreadable ones are skipped."""
     directory = ctx.paths.p(f"{RECORDS_DIR}/{InstanceKind.AUTO.value}")
     try:
         names = sorted(os.listdir(directory))

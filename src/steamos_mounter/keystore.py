@@ -50,6 +50,8 @@ NO_TERMINAL: Final = (
 )
 INVALID_KEY: Final = f"the key must be 1 to {KEY_CAP_CLI} bytes with no NUL byte"
 UNREADABLE_FILE: Final = "cannot read the key file"
+# The path is never logged: an owner may type the key where the path goes.
+UNREADABLE_FILE_DETAIL: Final = "the key file could not be read: {reason}"
 UNREADABLE_STDIN: Final = "cannot read the key from stdin"
 
 _CRLF: Final = b"\r\n"
@@ -218,12 +220,19 @@ def _prompt(prompt_text: str, tty_prompt: Callable[[str], str]) -> bytearray:
 
 
 def _read_file(file_path: str) -> bytearray:
+    """The file's bytes; a failure names neither the path nor the ``OSError``.
+
+    ``OSError.filename`` holds the path, so the ``UsageError`` is raised
+    outside the ``except`` block, with no context.
+    """
     try:
         with open(file_path, "rb") as stream:
             return _read_capped(stream)
     except OSError as error:
         reason = error.strerror
-    raise UsageError(UNREADABLE_FILE, detail=f"{file_path}: {reason}")
+    raise UsageError(
+        UNREADABLE_FILE, detail=UNREADABLE_FILE_DETAIL.format(reason=reason)
+    )
 
 
 def _read_stdin(stdin: BinaryIO) -> bytearray:

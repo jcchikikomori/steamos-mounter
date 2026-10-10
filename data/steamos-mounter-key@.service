@@ -1,0 +1,21 @@
+# Installed by steamos-mounter. Do not edit: install and update overwrite this file.
+# Instance name: the same as the registered instance. Started only by that instance.
+[Unit]
+Description=steamos-mounter key dialog for %f
+BindsTo=%i.device
+After=%i.device
+RequiresMountsFor=/opt/steamos-mounter /var/lib/steamos-mounter
+StartLimitIntervalSec=60
+StartLimitBurst=5
+CollectMode=inactive-or-failed
+
+[Service]
+Type=exec
+ExitType=main
+KillMode=control-group
+RuntimeMaxSec=300
+TimeoutStopSec=30
+UMask=0077
+SyslogIdentifier=steamos-mounter
+ExecStart=/usr/bin/python3 -I /opt/steamos-mounter/bin/steamos-mounter internal key %f
+ExecStopPost=/usr/bin/python3 -I /opt/steamos-mounter/bin/steamos-mounter internal key-stop %f

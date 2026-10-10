@@ -346,7 +346,8 @@ def test_unreadable_key_file_is_a_usage_error(tmp_path, kind):
         )
 
     assert raised.value.user_message == UNREADABLE_FILE
-    assert raised.value.detail.startswith(f"{path}: ")
+    assert raised.value.detail.startswith("the key file could not be read: ")
+    assert str(path) not in raised.value.detail
 
 
 def test_file_source_needs_a_path():

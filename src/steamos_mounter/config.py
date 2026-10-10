@@ -15,11 +15,13 @@ Two levels of failure, kept apart on purpose:
   or two entries clash (duplicate UUID, name or path). Those volumes do not
   mount, their valid UUIDs still block auto-mounting, and every other entry
   works. Two valid paths cannot nest: both are children of the same base.
+  The emitter writes only valid entries, so a registry with an invalid entry
+  is never rewritten (``require_rewritable``): the owner fixes it by hand.
 
 An absent ``config.toml`` in a good directory is the empty registry: the
-installer never creates it, the first ``add`` does (I001). ``save`` only
-writes: ``add``, ``remove`` and the installer regenerate the wiring and
-reload systemd right after it (Design Doc "Atomic Write" step 4).
+installer never creates it, the first ``add`` does (I001). ``save`` and
+``update`` only write: ``add``, ``remove`` and the installer regenerate the
+wiring (``update``'s ``then``) and reload systemd ("Atomic Write" step 4).
 """
 
 import logging
@@ -32,6 +34,12 @@ from typing import TYPE_CHECKING, Final, Literal
 
 from steamos_mounter import locks
 from steamos_mounter.atomicfile import check_owner_mode, write_atomic
+from steamos_mounter.config_emit import (  # SCHEMA_VERSION, emit: config's names too
+    SCHEMA_VERSION,
+    emit,
+    volume_fields,
+    volume_name,
+)
 from steamos_mounter.errors import RefusedError, RegistryError, UsageError
 from steamos_mounter.model import InvalidEntry, Registry, Step, Volume
 from steamos_mounter.naming import (
@@ -39,7 +47,7 @@ from steamos_mounter.naming import (
     PathKind,
     validate_fixed_path,
 )
-from steamos_mounter.ntfs import DRIVER_TOKENS, format_drivers, parse_drivers
+from steamos_mounter.ntfs import DRIVER_TOKENS, parse_drivers
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -48,15 +56,20 @@ if TYPE_CHECKING:
 
 REGISTRY_DIR: Final = "/etc/steamos-mounter"
 REGISTRY_PATH: Final = f"{REGISTRY_DIR}/config.toml"
-SCHEMA_VERSION: Final = 1
 REGISTRY_MODE: Final = 0o644
 # Neither the file nor its directory may be writable by group or others.
 FORBIDDEN_BITS: Final = 0o022
-HEADER: Final = (
-    "# steamos-mounter registry. "
-    "Managed by steamos-mounter: comments and formatting are not kept."
-)
 UNUSABLE: Final = "the registry cannot be used"
+# The position tomllib appends to every message: "(at line 2, column 8)".
+_TOML_POSITION: Final = re.compile(r"\((at line \d+, column \d+|at end of document)\)$")
+NOT_REWRITTEN_ONE: Final = (
+    "the registry has an invalid entry: [[volume]] number {numbers}. Fix or remove"
+    f" it in {REGISTRY_PATH} first"
+)
+NOT_REWRITTEN_MANY: Final = (
+    "the registry has invalid entries: [[volume]] numbers {numbers}. Fix or remove"
+    f" them in {REGISTRY_PATH} first"
+)
 
 TOP_LEVEL_KEYS: Final = frozenset({"schema_version", "volume"})
 FSTYPES: Final = frozenset({"ntfs", "exfat", "vfat", "btrfs", "BitLocker"})  # DD-07
@@ -75,9 +88,6 @@ DUPLICATE_PATH: Final = "duplicate path"
 # (``parse`` without ``mount_base``, ``with_volume``). Rule 9 needs a real
 # base: every registered path is a direct child of it.
 DEFAULT_MOUNT_BASE: Final = "/run/media/deck"
-# A TOML control character: U+0000 to U+001F and U+007F.
-_TOML_CONTROL: Final = re.compile(r"[\x00-\x1f\x7f]")
-_TOML_ESCAPES: Final = {"\\": "\\\\", '"': '\\"'}
 
 log = logging.getLogger(__name__)
 
@@ -163,17 +173,25 @@ def _unusable(reason: str) -> RegistryError:
 
 
 def _toml(text: str) -> dict[str, object]:
+    """The parsed document; a failure keeps only tomllib's position.
+
+    tomllib quotes key names in some messages (``Cannot declare ... twice``)
+    and keeps the document, so neither its text nor the error itself goes
+    on: the ``RegistryError`` is raised outside the ``except`` block.
+    """
     try:
         return tomllib.loads(text)
     except tomllib.TOMLDecodeError as error:
-        raise _unusable(f"not valid TOML: {error}") from error
+        position = _TOML_POSITION.search(str(error))
+    where = f" ({position.group(1)})" if position else ""
+    raise _unusable(f"not valid TOML{where}")
 
 
 def _entries(document: Mapping[str, object]) -> list[object]:
     """Top-level rules; the raw ``[[volume]]`` entries."""
     unknown = next((key for key in document if key not in TOP_LEVEL_KEYS), None)
     if unknown is not None:
-        raise _unusable(f"unknown top-level key {unknown!r}")
+        raise _unusable(_unknown_key(unknown, kind="top-level key"))
     if "schema_version" not in document:
         raise _unusable("schema_version is missing")
     version = document["schema_version"]
@@ -188,6 +206,18 @@ def _entries(document: Mapping[str, object]) -> list[object]:
 
 def _entry_index(entry: InvalidEntry) -> int:
     return entry.index
+
+
+# An unknown entry key is quoted only when it looks like a schema key (a typo
+# such as ``pathh``); anything else may be a key pasted by hand (AC-005).
+_QUOTABLE_KEY: Final = re.compile(r"[a-z][a-z0-9_]{0,31}")
+
+
+def _unknown_key(key: str, *, kind: str = "key") -> str:
+    """The reason for an unknown key, never quoting a pasted secret."""
+    if _QUOTABLE_KEY.fullmatch(key) is None:
+        return f"unknown {kind}"
+    return f"unknown {kind} {key!r}"
 
 
 # --- per-entry rules (one row per key) ------------------------------------------------
@@ -285,7 +315,7 @@ def _entry_problem(entry: object, mount_base: str) -> str | None:
         return "entry is not a table"
     unknown = next((key for key in entry if key not in ENTRY_KEYS), None)
     if unknown is not None:
-        return f"unknown key {unknown!r}"
+        return _unknown_key(unknown)
     for key, required, check in RULES:
         if key in entry:
             problem = check(entry[key], mount_base)
@@ -353,15 +383,17 @@ def _clashes(candidates: Iterable[tuple[int, Volume]]) -> dict[int, str]:
 # --- changing -------------------------------------------------------------------------
 
 
-def with_volume(registry: Registry, volume: Volume) -> Registry:
+def with_volume(
+    registry: Registry, volume: Volume, *, mount_base: str = DEFAULT_MOUNT_BASE
+) -> Registry:
     """``registry`` plus ``volume``, sorted by name.
 
-    Raises ``RefusedError`` when ``volume`` breaks a rule a read would apply
-    (with ``DEFAULT_MOUNT_BASE``), or clashes with a registered volume
-    (duplicate UUID, name or path). Invalid entries are carried along
-    unchanged.
+    Raises ``RefusedError`` when ``volume`` breaks a rule a read with
+    ``mount_base`` would apply (callers pass the platform's), or clashes with
+    a registered volume (duplicate UUID, name or path). Invalid entries are
+    carried along unchanged.
     """
-    problem = _entry_problem(_fields(volume), DEFAULT_MOUNT_BASE)
+    problem = _entry_problem(volume_fields(volume), mount_base)
     if problem is not None:
         raise RefusedError(problem, detail=f"registry entry refused: {problem}")
     for registered in registry.volumes:
@@ -373,7 +405,7 @@ def with_volume(registry: Registry, volume: Volume) -> Registry:
             )
     return Registry(
         schema_version=registry.schema_version,
-        volumes=tuple(sorted((*registry.volumes, volume), key=_volume_name)),
+        volumes=tuple(sorted((*registry.volumes, volume), key=volume_name)),
         invalid=registry.invalid,
     )
 
@@ -393,83 +425,70 @@ def without_volume(registry: Registry, name: str) -> Registry:
     )
 
 
+def require_rewritable(registry: Registry) -> None:
+    """Refuse to rewrite ``registry`` when it has an invalid entry (exit 1).
+
+    The emitter writes only valid entries, so a rewrite would silently drop a
+    hand-edited entry with a mistake. The ``RegistryError`` names the entries
+    by their 1-based ``[[volume]]`` position only, never by a value from the
+    file; its journal-only detail carries each entry's reason.
+    """
+    if not registry.invalid:
+        return
+    numbers = [str(entry.index + 1) for entry in registry.invalid]
+    message = NOT_REWRITTEN_ONE if len(numbers) == 1 else NOT_REWRITTEN_MANY
+    reasons = "; ".join(
+        f"[[volume]] number {number}: {entry.reason}"
+        for number, entry in zip(numbers, registry.invalid, strict=True)
+    )
+    raise RegistryError(
+        message.format(numbers=", ".join(numbers)),
+        detail=f"registry not rewritten: {reasons}",
+    )
+
+
 def save(ctx: "Context", registry: Registry) -> None:
     """Write ``registry`` under the registry lock, atomically, root 0644.
 
     The current file is read and validated first: an unusable registry is
     never replaced, so a broken hand edit is not lost (``RegistryError``,
-    exit 1). An absent file counts as empty, so the first ``add`` creates it.
-    Invalid entries are not written. Callers wire and reload afterwards.
+    exit 1). Nor is one with an invalid entry (``require_rewritable``). An
+    absent file counts as empty, so the first ``add`` creates it. Callers
+    wire and reload afterwards.
+    """
+    update(ctx, lambda _current: registry)
+
+
+def update(
+    ctx: "Context",
+    change: Callable[[Registry], Registry],
+    *,
+    then: Callable[[Registry], object] | None = None,
+) -> Registry:
+    """Read, ``change`` and write the registry under one hold of the registry lock.
+
+    ``save`` cannot run inside ``registry_lock`` (a second ``flock`` descriptor
+    of this process would wait for the first), so ``add`` and ``remove`` hand
+    their change here and never lose each other's update. ``change`` gets the
+    current registry (unusable, or one with an invalid entry: ``RegistryError``,
+    nothing written) and returns the new one, or raises to write nothing.
+    ``then`` runs with the written registry before the lock is released (the
+    wiring step).
     """
     with locks.registry_lock(ctx):
-        load(ctx)
+        current = load(ctx)
+        require_rewritable(current)
+        changed = change(current)
         write_atomic(
             ctx.paths.p(REGISTRY_PATH),
-            emit(registry).encode("utf-8"),
+            emit(changed).encode("utf-8"),
             mode=REGISTRY_MODE,
             uid=ctx.platform.trusted_uid,
             # Root entries run with group 0, which gives the Design Doc's
             # root:root; the group carries no trust (mode 0644).
             gid=os.getegid(),
         )
-    log.info("registry saved with %d volumes", len(registry.volumes))
-
-
-# --- emitting -------------------------------------------------------------------------
-
-
-def emit(registry: Registry) -> str:
-    """The registry in the Design Doc's exact shape, volumes sorted by name.
-
-    Header, ``schema_version = 1``, then one ``[[volume]]`` table per volume
-    after a blank line; keys in schema order, ``drivers`` only when set.
-    Invalid entries are not part of the output.
-    """
-    head = f"{HEADER}\nschema_version = {SCHEMA_VERSION}\n"
-    tables = [_table(volume) for volume in sorted(registry.volumes, key=_volume_name)]
-    return "\n".join([head, *tables])
-
-
-def _volume_name(volume: Volume) -> str:
-    return volume.name
-
-
-def _fields(volume: Volume) -> dict[str, object]:
-    """``volume`` as its table's keys and values, in schema order."""
-    fields: dict[str, object] = {
-        "name": volume.name,
-        "uuid": volume.uuid,
-        "path": volume.path,
-        "fstype": volume.fstype,
-    }
-    if volume.drivers is not None:
-        fields["drivers"] = format_drivers(volume.drivers)
-    fields["nosuid"] = volume.nosuid
-    fields["nodev"] = volume.nodev
-    return fields
-
-
-def _table(volume: Volume) -> str:
-    lines = ["[[volume]]"]
-    lines.extend(
-        f"{key} = {_toml_value(value)}" for key, value in _fields(volume).items()
-    )
-    return "\n".join(lines) + "\n"
-
-
-def _toml_value(value: object) -> str:
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, list):
-        return "[" + ", ".join(_toml_value(item) for item in value) + "]"
-    return _toml_string(str(value))
-
-
-def _toml_string(value: str) -> str:
-    """A TOML basic string: ``\\\\``, ``\\"`` and ``\\uXXXX`` for controls."""
-    escaped = "".join(_TOML_ESCAPES.get(char, char) for char in value)
-    return '"' + _TOML_CONTROL.sub(_unicode_escape, escaped) + '"'
-
-
-def _unicode_escape(match: re.Match[str]) -> str:
-    return f"\\u{ord(match.group()):04X}"
+        log.info("registry saved with %d volumes", len(changed.volumes))
+        if then is not None:
+            then(changed)
+    return changed

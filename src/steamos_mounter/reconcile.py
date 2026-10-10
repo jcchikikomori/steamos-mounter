@@ -89,7 +89,7 @@ def _reconcile(current: report.PassState) -> ReconcileOutcome:
         return _announce(current, Route(Action.REJECT, routing.INVALID_KNAME), kname)
     if current.kind is InstanceKind.REGISTERED:
         current.owner = _registered_owner(current, kname)
-    inp = _gather(current.ctx, current.kind, kname)
+    inp = gather(current.ctx, current.kind, kname)
     current.inp = inp
     route = routing.route(inp)
     current.route = route
@@ -133,8 +133,12 @@ def _registered_owner(current: report.PassState, kname: str) -> report.Owner | N
     )
 
 
-def _gather(ctx: "Context", kind: InstanceKind, kname: str) -> RoutingInput:
-    """Every fact routing needs, read once."""
+def gather(ctx: "Context", kind: InstanceKind, kname: str) -> RoutingInput:
+    """Every fact routing needs, read once.
+
+    The installer asks the same question for each present device before it
+    starts an auto instance, so the start rule and the handler never differ.
+    """
     tree = blockdev.read_tree(ctx)
     registry: Registry | RegistryError
     try:

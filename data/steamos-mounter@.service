@@ -1,0 +1,23 @@
+# Installed by steamos-mounter. Do not edit: install and update overwrite this file.
+# Instance name: the escaped /dev/disk/by-uuid/<UUID> path of a registered volume.
+[Unit]
+Description=steamos-mounter registered volume %f
+BindsTo=%i.device
+After=%i.device
+RequiresMountsFor=/opt/steamos-mounter /var/lib/steamos-mounter
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExitType=main
+KillMode=control-group
+TimeoutStartSec=90
+TimeoutStopSec=60
+UMask=0022
+SyslogIdentifier=steamos-mounter
+ExecStart=/usr/bin/python3 -I /opt/steamos-mounter/bin/steamos-mounter internal reconcile --trigger start registered %f
+ExecReload=/usr/bin/python3 -I /opt/steamos-mounter/bin/steamos-mounter internal reconcile --trigger reload registered %f
+ExecStop=/usr/bin/python3 -I /opt/steamos-mounter/bin/steamos-mounter internal teardown registered %f
+ExecStopPost=/usr/bin/python3 -I /opt/steamos-mounter/bin/steamos-mounter internal sweep registered %f

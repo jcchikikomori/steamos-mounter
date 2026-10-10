@@ -1,0 +1,21 @@
+# steamos-mounter install manifest. Install, uninstall and doctor read it.
+# kind path owner mode source role
+format	1
+dir	/etc/steamos-mounter	root:root	0755	-	registry-dir
+# registry row: never created by the installer; created by the first add, restored from kept-config.toml.
+registry	/etc/steamos-mounter/config.toml	root:root	0644	-	registry
+file	/etc/atomic-update.conf.d/steamos-mounter.conf	root:root	0644	data/steamos-mounter.conf	keep-list
+file	/etc/systemd/system/steamos-mounter@.service	root:root	0644	data/steamos-mounter@.service	unit
+file	/etc/systemd/system/steamos-mounter-auto@.service	root:root	0644	data/steamos-mounter-auto@.service	unit
+file	/etc/systemd/system/steamos-mounter-key@.service	root:root	0644	data/steamos-mounter-key@.service	unit
+file	/etc/udev/rules.d/90-steamos-mounter.rules	root:root	0644	data/90-steamos-mounter.rules	udev-rule
+dir	/var/lib/steamos-mounter	root:root	0755	-	state
+dir	/var/lib/steamos-mounter/keys	root:root	0700	-	keys
+# /run rows live on tmpfs: created on demand by every root entry (records.ensure_runtime_dirs) and by the installer.
+dir	/run/steamos-mounter	root:root	0755	-	runtime
+dir	/run/steamos-mounter/records	root:root	0755	-	runtime
+dir	/run/steamos-mounter/records/registered	root:root	0755	-	runtime
+dir	/run/steamos-mounter/records/auto	root:root	0755	-	runtime
+dir	/run/steamos-mounter/locks	root:root	0700	-	runtime
+link	/opt/steamos-mounter/bin	root:root	-	current/bin	release-link
+link	/opt/steamos-mounter/current	root:root	-	-	release-link

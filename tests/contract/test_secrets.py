@@ -30,9 +30,26 @@ The reconcile half (P3-T06) runs the stored-key unlock through
 names the key file to cryptsetup and never opens it, so the key is found
 only in that file.
 
+The dialog half (P4-T02) runs ``dialog.ask_password`` against the fake
+runner for every outcome that sees typed bytes (entered, NUL, oversized, a
+failed exit with output, a timeout): the key may be found only in the
+returned ``SecretBytes`` of an ``ENTERED`` answer, never in an argv, the
+environment, the logs (journal, stderr fallback, a handler added after setup
+(redacted)), the terminal or the answer's text.
+
+The key unit half (P4-T03) runs ``keyunit.run`` end to end with a typed key
+that is entered and opened (the session is gone before the save question),
+wrong, saved and not saved (also a key with trailing spaces, which must reach
+cryptsetup and the key file exactly as typed), plus a cryptsetup that raises
+while the key is live: the key may be found only in the fake cryptsetup
+stdin and, after a Yes, in the 0600 key file; never in an argv, the
+environment, the logs (journal, stderr fallback, a handler added after setup
+(redacted)), the terminal, a record, the registry or a secret still live
+after the run. The raw, unredacted caplog check of the key unit lives in the
+unit and flow tests (``tests.helpers.key_dialog.key_found_outside``).
+
 Assertions compare booleans computed beforehand, so a failing test never
-prints the bytes. Extended by later phases: ``add``, ``set-key`` and the key
-unit.
+prints the bytes. Extended by later phases: ``add`` and ``set-key``.
 """
 
 import builtins
@@ -45,14 +62,15 @@ from collections.abc import Iterator
 
 import pytest
 
-from steamos_mounter import bitlocker, keystore, reconcile
+from steamos_mounter import bitlocker, dialog, keystore, keyunit, reconcile
 from steamos_mounter.bitlocker import UnlockOutcome
 from steamos_mounter.errors import SecretHandlingError, UsageError
 from steamos_mounter.journal import NOTICE, fields
 from steamos_mounter.keystore import KeyStatus
-from steamos_mounter.model import InstanceKind, Trigger, VolumeState
+from steamos_mounter.model import InstanceKind, Trigger, Volume, VolumeState
 from steamos_mounter.runner import Command, CommandResult, SubprocessRunner
-from steamos_mounter.sensitive import SecretBytes
+from steamos_mounter.sensitive import SecretBytes, live_secrets
+from steamos_mounter.session import SessionCheck, Verdict
 from tests.helpers.builders import MEDIABOX, PERSONAL, registry_text
 from tests.helpers.fake_runner import Answer
 from tests.helpers.flows import (
@@ -70,6 +88,13 @@ from tests.helpers.flows import (
     script_lsblk,
     write_key_file,
     write_registry,
+)
+from tests.helpers.key_dialog import (
+    KEY_FILE,
+    NO,
+    YES,
+    given_key_unit_started,
+    script_key_unit_flow,
 )
 
 TEST_KEY = b"TEST-KEY-7f3a9c-do-not-leak"
@@ -523,3 +548,199 @@ def test_stored_key_unlock_never_reads_or_shows_the_key(
     [open_call] = [call.argv for call in calls if call.argv[0] == CRYPTSETUP]
     assert open_call[4:6] == ("--key-file", key_file)
     assert stream.getvalue()  # the pass did log, through the redacting handler
+
+
+# --- dialog: the typed key (P4-T02) ------------------------------------------------
+
+DIALOG_TRANSPORT = ("/usr/bin/systemd-run", "--user", "--pipe")
+USER_STOP = ("/usr/bin/systemctl", "--user", "stop")
+DIALOG_SESSION = SessionCheck(
+    verdict=Verdict.DESKTOP,
+    session_id="5",
+    scope="session-5.scope",
+    display=":0",
+    xorg_pid=4242,
+    xauthority=None,
+    detail={},
+)
+PERSONAL_VOLUME = Volume(
+    name="PERSONAL",
+    uuid=CONTAINER_UUID,
+    path="/run/media/deck/PERSONAL",
+    fstype="BitLocker",
+    drivers=None,
+    nosuid=True,
+    nodev=True,
+)
+
+
+@pytest.mark.parametrize("value", SECRETS, ids=["test-key", "recovery-key"])
+@pytest.mark.parametrize(
+    ("answer", "outcome"),
+    [
+        (lambda key: Answer(stdout=key + b"\n"), dialog.Outcome.ENTERED),
+        (lambda key: Answer(stdout=key + b"\0\n"), dialog.Outcome.FAILED),
+        (lambda key: Answer(stdout=key * 10), dialog.Outcome.FAILED),
+        (lambda key: Answer(returncode=1, stdout=key + b"\n"), dialog.Outcome.FAILED),
+        (lambda key: Answer(returncode=None, timed_out=True, stdout=key), None),
+    ],
+    ids=["entered", "nul", "oversized", "exit-1", "timeout"],
+)
+def test_typed_key_reaches_only_the_returned_secret(
+    runner_logs, ctx, fake_runner, caplog, capsys, value, answer, outcome
+):
+    """AC-077, NFR-09: the dialog's output stays inside ``SecretBytes``."""
+    logging.getLogger().addHandler(caplog.handler)
+    fake_runner.on(USER_STOP, Answer(returncode=5), repeat=True)
+    fake_runner.on(DIALOG_TRANSPORT, answer(value))
+
+    result = dialog.ask_password(
+        ctx, DIALOG_SESSION, PERSONAL_VOLUME, why="stored_key_rejected"
+    )
+
+    expected = outcome or dialog.Outcome.TIMED_OUT
+    kept = result.key is not None and result.key.reveal() == value
+    if result.key is not None:
+        result.key.clear()
+    text = value.decode()
+    in_calls = any(
+        text in item
+        for call in fake_runner.calls
+        for item in (*call.argv, *call.env_extra, *call.env_extra.values())
+    ) or any(call.has_stdin for call in fake_runner.calls)
+    terminal = capsys.readouterr()
+    in_logs = (
+        value in runner_logs()
+        or text in caplog.text
+        or text in terminal.out + terminal.err
+    )
+    in_text = text in f"{result}|{result!r}"
+    still_live = any(value in secret for secret in live_secrets())
+    assert result.outcome is expected
+    assert kept is (expected is dialog.Outcome.ENTERED)
+    assert not in_calls
+    assert not in_logs
+    assert not in_text
+    assert not still_live
+
+
+# --- key unit: the typed key from the dialog to cryptsetup and the key file (P4-T03)
+
+KEY_UNIT_PATHS = ("entered", "wrong", "saved", "not-saved")
+# Typed as is: only the dialog's one trailing newline goes, never the spaces.
+SPACED_KEY = TEST_KEY + b"  "
+TYPED_KEYS = (*SECRETS, SPACED_KEY)
+TYPED_KEY_IDS = ["test-key", "recovery-key", "trailing-spaces"]
+
+
+def script_typed_key(fake_runner, opened, value: bytes, path: str) -> None:
+    """The key unit flow for ``path`` with ``value`` typed into the dialog."""
+    if path == "entered":  # opened, then a mode switch before the save question
+        fake_runner.on(("/usr/bin/loginctl", "show-user"), "loginctl-user-deck.txt")
+        fake_runner.on(("/usr/bin/loginctl", "show-user"), Answer(stdout=b"Display=\n"))
+    script_key_unit_flow(
+        fake_runner,
+        opened,
+        password=Answer(stdout=value + b"\n"),
+        open_rc=2 if path == "wrong" else 0,
+        save=YES if path == "saved" else NO,
+    )
+
+
+def typed_key_found(value, fake_runner, logs, caplog, capsys) -> dict[str, bool]:
+    """Where ``value`` is, as booleans: calls, logs, terminal, live secrets."""
+    text = value.decode()
+    terminal = capsys.readouterr()
+    return {
+        "argv_or_env": any(
+            text in item
+            for call in fake_runner.calls
+            for item in (*call.argv, *call.env_extra, *call.env_extra.values())
+        ),
+        "logs": value in logs or text in caplog.text,
+        "terminal": text in terminal.out + terminal.err,
+        "live": any(value in secret for secret in live_secrets()),
+    }
+
+
+@pytest.mark.parametrize("value", TYPED_KEYS, ids=TYPED_KEY_IDS)
+@pytest.mark.parametrize("path", KEY_UNIT_PATHS)
+def test_dialog_key_never_leaks(
+    runner_logs,
+    ctx,
+    fake_runner,
+    host_tree,
+    tmp_path,
+    caplog,
+    capsys,
+    value,
+    path,
+):
+    """AC-077, NFR-09: the typed key reaches cryptsetup's stdin, and the key file
+    only after a Yes; nothing else holds it, and no secret outlives the run."""
+    logging.getLogger().addHandler(caplog.handler)
+    opened = given_key_unit_started(ctx, tmp_path, host_tree)
+    script_typed_key(fake_runner, opened, value, path)
+
+    keyunit.run(ctx, PERSONAL_DEVICE_PATH)
+
+    found = typed_key_found(value, fake_runner, runner_logs(), caplog, capsys)
+    stdin_holds_key = [
+        (call.argv[0], call.stdin == value)
+        for call in fake_runner.calls
+        if call.has_stdin
+    ]
+    holders = files_holding(tmp_path, value)
+    assert found == {
+        "argv_or_env": False,
+        "logs": False,
+        "terminal": False,
+        "live": False,
+    }
+    assert stdin_holds_key == [(CRYPTSETUP, True)]  # one open, the key on stdin
+    stored_exactly = path == "saved" and (tmp_path / KEY_FILE).read_bytes() == value
+    assert holders == ([KEY_FILE] if path == "saved" else [])
+    assert stored_exactly is (path == "saved")  # the bytes that opened it, no strip
+
+
+@pytest.mark.parametrize("value", SECRETS, ids=["test-key", "recovery-key"])
+def test_exception_while_the_typed_key_is_live_never_carries_it(
+    runner_logs, ctx, fake_runner, host_tree, tmp_path, caplog, capsys, value
+):
+    """A failure under the volume lock, with the key live, logged as unit_entry
+    logs it: the traceback is redacted and the key is cleared on the way out."""
+    logging.getLogger().addHandler(caplog.handler)
+    opened = given_key_unit_started(ctx, tmp_path, host_tree)
+
+    def crashed(_command) -> None:
+        raise RuntimeError("cryptsetup crashed")
+
+    script_key_unit_flow(
+        fake_runner,
+        opened,
+        password=Answer(stdout=value + b"\n"),
+        hooks={"open": crashed},
+    )
+
+    with pytest.raises(RuntimeError) as raised:
+        keyunit.run(ctx, PERSONAL_DEVICE_PATH)
+    try:
+        raise raised.value
+    except RuntimeError:
+        log.exception("key unit failed")
+
+    found = typed_key_found(value, fake_runner, runner_logs(), caplog, capsys)
+    shown = f"{raised.value}|{raised.value!r}".encode()
+    [open_call] = [call for call in fake_runner.calls if call.argv[0] == CRYPTSETUP]
+    assert found == {
+        "argv_or_env": False,
+        "logs": False,
+        "terminal": False,
+        "live": False,
+    }
+    key_in_exception = value in shown
+    assert not key_in_exception
+    stdin_was_key = open_call.stdin == value
+    assert stdin_was_key  # it was live when cryptsetup was called
+    assert files_holding(tmp_path, value) == []
+    assert "cryptsetup crashed" in caplog.text  # the failure itself is logged

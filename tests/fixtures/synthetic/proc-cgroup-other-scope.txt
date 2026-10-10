@@ -1,0 +1,2 @@
+# synthetic: /proc/<pid>/cgroup of a process outside the Desktop Mode session (an X server left from an earlier logind session); the path ends in another session's scope
+0::/user.slice/user-1000.slice/session-3.scope

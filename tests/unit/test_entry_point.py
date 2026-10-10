@@ -10,7 +10,9 @@ The script has no ``.py`` suffix, so it is loaded by path with
 ``SourceFileLoader``. Trees are real temporary directories with real modes and
 real symlinks. The test user is not root, so the owner check is faked at the
 ``os.lstat`` boundary: every entry reports uid 0 unless the test names it as
-foreign. ``steamos_mounter.cli`` is a stand-in module until the CLI lands.
+foreign. The hand-over records calls on the real ``steamos_mounter.cli``
+(its ``main`` replaced by a recorder); the unpatched hand-over runs in
+``tests/integration/test_scripts.py`` as a real ``python3 -I`` child.
 """
 
 import importlib.machinery
@@ -24,6 +26,7 @@ from pathlib import Path
 
 import pytest
 
+from steamos_mounter import cli
 from tests.contract.test_python import foreign_imports
 
 REPO = Path(__file__).resolve().parents[2]
@@ -150,16 +153,14 @@ def root_owner(monkeypatch: pytest.MonkeyPatch) -> Callable[..., None]:
 
 @pytest.fixture
 def cli_calls(monkeypatch: pytest.MonkeyPatch) -> list[tuple[list[str], str]]:
-    """Stand-in ``steamos_mounter.cli`` recording each ``main`` call."""
+    """The real ``steamos_mounter.cli`` with ``main`` recording each call."""
     calls: list[tuple[list[str], str]] = []
 
     def main(argv: list[str], *, release_root: str) -> int:
         calls.append((argv, release_root))
         return CLI_EXIT
 
-    stand_in = types.ModuleType("steamos_mounter.cli")
-    stand_in.main = main
-    monkeypatch.setitem(sys.modules, "steamos_mounter.cli", stand_in)
+    monkeypatch.setattr(cli, "main", main)
     monkeypatch.setattr(sys, "path", list(sys.path))
     monkeypatch.setattr(sys, "argv", ["steamos-mounter", "list", "--json"])
     return calls

@@ -13,13 +13,15 @@ import os
 import stat
 import threading
 import time
+import tomllib
+import traceback
 from pathlib import Path
 
 import pytest
 
 from steamos_mounter import config
 from steamos_mounter.config import emit, load, parse, save, with_volume, without_volume
-from steamos_mounter.errors import RefusedError, RegistryError, UsageError
+from steamos_mounter.errors import ExitCode, RefusedError, RegistryError, UsageError
 from steamos_mounter.locks import registry_lock
 from steamos_mounter.model import Driver, InvalidEntry, Mode, Registry, Step, Volume
 from steamos_mounter.platforms import steamos
@@ -236,6 +238,85 @@ def test_unusable_file_raises_registry_error(text, reason):
 
     assert raised.value.detail.startswith(reason)
     assert str(raised.value) == "the registry cannot be used"
+
+
+RECOVERY_KEY = "123456-234567-345678-456789-567890-678901-789012-890123"
+# Ways a key pasted into config.toml makes the file unusable: as a top-level
+# key name, and as a key name tomllib quotes in its own error text.
+UNUSABLE_WITH_PASTED_KEY = (
+    raw_registry_text([], top=f"schema_version = 1\n{RECOVERY_KEY} = true"),
+    raw_registry_text(
+        [], top=f"schema_version = 1\n[{RECOVERY_KEY}]\n[{RECOVERY_KEY}]"
+    ),
+    raw_registry_text(
+        [], top=f"schema_version = 1\nx = {{{RECOVERY_KEY} = 1, {RECOVERY_KEY} = 2}}"
+    ),
+)
+PASTED_IDS = ["top-level-key", "table-declared-twice", "inline-duplicate"]
+
+
+@pytest.mark.parametrize("text", UNUSABLE_WITH_PASTED_KEY, ids=PASTED_IDS)
+def test_an_unusable_file_never_carries_a_pasted_key(text):
+    with pytest.raises(RegistryError) as raised:
+        parse(text)
+
+    error = raised.value
+    told = "".join(traceback.format_exception(error)) + error.detail + repr(error)
+    carried = RECOVERY_KEY in told
+    assert not carried
+
+
+def test_invalid_toml_without_a_position_says_only_that(monkeypatch):
+    """A tomllib message without its usual position suffix: nothing of it is kept."""
+
+    class Unplaced(tomllib.TOMLDecodeError):
+        pass
+
+    def unplaced(_text: str) -> dict[str, object]:
+        # __new__ alone: no position suffix, and no 3.14 constructor warning.
+        raise Unplaced.__new__(Unplaced, f"Duplicate key {RECOVERY_KEY!r}")
+
+    monkeypatch.setattr(config.tomllib, "loads", unplaced)
+
+    with pytest.raises(RegistryError) as raised:
+        parse("ignored")
+
+    assert raised.value.detail == "not valid TOML"
+
+
+def test_a_pasted_top_level_key_is_reported_unnamed():
+    with pytest.raises(RegistryError) as raised:
+        parse(UNUSABLE_WITH_PASTED_KEY[0])
+
+    assert raised.value.detail == "unknown top-level key"
+
+
+def test_an_identifier_like_top_level_key_is_named():
+    with pytest.raises(RegistryError) as raised:
+        parse(raw_registry_text([], top="schema_version = 1\nvolumes = []"))
+
+    assert raised.value.detail == "unknown top-level key 'volumes'"
+
+
+@pytest.mark.parametrize(
+    ("text", "detail"),
+    [
+        (HEADER + "schema_version = [\n", "not valid TOML (at end of document)"),
+        (
+            UNUSABLE_WITH_PASTED_KEY[1],
+            "not valid TOML (at line 4, column 57)",
+        ),
+    ],
+    ids=["end-of-document", "line-and-column"],
+)
+def test_invalid_toml_keeps_only_the_position(text, detail):
+    with pytest.raises(RegistryError) as raised:
+        parse(text)
+
+    error = raised.value
+    assert error.detail == detail
+    assert error.__cause__ is None
+    assert error.__context__ is None
 
 
 def test_empty_volume_array_is_no_registrations():
@@ -515,6 +596,37 @@ def test_registry_never_holds_key(key):
     )
     assert TEST_KEY not in repr(registry)
     assert TEST_KEY not in emit(registry)
+
+
+# A key pasted as a TOML key name never reaches a reason: only identifier-like
+# names (^[a-z][a-z0-9_]{0,31}$) are quoted, for typo diagnosis.
+PASTED_KEY_NAMES = (
+    "123456-234567-345678-456789-567890-678901-789012-890123",  # recovery key
+    "Tr0ub4dor-And-Correct-Horse-Battery-Staple-9xQ",  # long, mixed case
+    "a" * 33,  # one over the identifier length
+    "Pathh",  # upper case
+    "_path",  # does not start with a letter
+)
+
+
+@pytest.mark.parametrize("name", ["pathh", "x", "a" * 32, "drivers_2"])
+def test_an_identifier_like_unknown_key_is_named(name):
+    registry = _parse_one(**{name: True})
+
+    assert [entry.reason for entry in registry.invalid] == [f"unknown key {name!r}"]
+
+
+@pytest.mark.parametrize(
+    "name",
+    PASTED_KEY_NAMES,
+    ids=["recovery-key", "mixed-case", "33-chars", "upper-case", "underscore-first"],
+)
+def test_any_other_unknown_key_is_not_named(name):
+    registry = _parse_one(**{name: True})
+
+    shown = name in repr(registry)
+    assert [entry.reason for entry in registry.invalid] == ["unknown key"]
+    assert not shown
 
 
 def test_volume_type_has_no_field_for_a_key():
@@ -1061,3 +1173,181 @@ def test_save_does_not_wire(ctx, etc_dir, locks_dir, fake_runner):
 def test_registry_path_constants():
     assert config.REGISTRY_PATH == "/etc/steamos-mounter/config.toml"
     assert config.SCHEMA_VERSION == 1
+
+
+# --- update: one read-modify-write under one hold of the registry lock -------------
+
+
+def test_two_interleaved_updates_both_survive(ctx, etc_dir, locks_dir):
+    """The second update reads after the first wrote: no lost update."""
+    first_inside = threading.Event()
+    release_first = threading.Event()
+    errors: list[BaseException] = []
+
+    def add_mediabox(current: Registry) -> Registry:
+        first_inside.set()
+        release_first.wait(5.0)
+        return with_volume(current, MEDIABOX_VOLUME)
+
+    def first() -> None:
+        try:
+            config.update(ctx, add_mediabox)
+        except BaseException as error:  # noqa: BLE001 - reported by the assert below
+            errors.append(error)
+
+    thread = threading.Thread(target=first)
+    thread.start()
+    assert first_inside.wait(5.0)
+    second = threading.Thread(
+        target=lambda: config.update(
+            ctx, lambda current: with_volume(current, PERSONAL_VOLUME)
+        )
+    )
+    second.start()
+    time.sleep(0.2)  # the second update is now waiting for the lock
+    release_first.set()
+    thread.join(5.0)
+    second.join(5.0)
+
+    assert errors == []
+    assert [volume.name for volume in load(ctx).volumes] == ["MEDIABOX", "PERSONAL"]
+
+
+def test_update_writes_nothing_when_the_change_refuses(ctx, etc_dir, locks_dir):
+    _write_registry(etc_dir, DESIGN_EXAMPLE)
+
+    def refuse(_current: Registry) -> Registry:
+        raise RefusedError("duplicate name")
+
+    with pytest.raises(RefusedError):
+        config.update(ctx, refuse)
+
+    assert (etc_dir / "config.toml").read_text(encoding="utf-8") == DESIGN_EXAMPLE
+
+
+def test_update_runs_then_with_the_written_registry_under_the_lock(
+    ctx, etc_dir, locks_dir
+):
+    seen = []
+
+    def then(saved: Registry) -> None:
+        with (
+            pytest.raises(config.locks.LockTimeout),
+            registry_lock(ctx, timeout=0.0),
+        ):
+            pass
+        seen.append((saved, load(ctx)))
+
+    result = config.update(
+        ctx, lambda current: with_volume(current, MEDIABOX_VOLUME), then=then
+    )
+
+    assert seen == [(result, result)]
+    assert result.volumes == (MEDIABOX_VOLUME,)
+
+
+def test_update_refuses_an_unusable_registry(ctx, etc_dir, locks_dir):
+    _write_registry(etc_dir, raw_registry_text([], top="schema_version = 9"))
+
+    with pytest.raises(RegistryError):
+        config.update(ctx, lambda current: current)
+
+
+def test_with_volume_checks_rule_9_against_the_given_base():
+    elsewhere = dataclasses.replace(MEDIABOX_VOLUME, path="/media/MEDIABOX")
+
+    assert with_volume(EMPTY, elsewhere, mount_base="/media").volumes == (elsewhere,)
+    with pytest.raises(RefusedError, match=NOT_BASE_CHILD):
+        with_volume(EMPTY, elsewhere)
+
+
+# --- no rewrite of a registry with invalid entries (owner decision 2026-10-11) ------
+
+# PERSONAL, the second [[volume]], breaks rule 9.
+ONE_INVALID = DESIGN_EXAMPLE.replace(
+    'path = "/run/media/deck/PERSONAL"', 'path = "/mnt/PERSONAL"'
+)
+ONE_INVALID_MESSAGE = (
+    "the registry has an invalid entry: [[volume]] number 2. Fix or remove it in"
+    " /etc/steamos-mounter/config.toml first"
+)
+ONE_INVALID_DETAIL = "registry not rewritten: [[volume]] number 2: " + NOT_BASE_CHILD
+
+
+REWRITES = {
+    "save": lambda ctx: save(ctx, Registry(1, (MEDIABOX_VOLUME,), ())),
+    "update": lambda ctx: config.update(ctx, lambda current: current),
+}
+
+
+@pytest.mark.parametrize("rewrite", ["save", "update"])
+def test_a_registry_with_an_invalid_entry_is_never_rewritten(
+    ctx, etc_dir, locks_dir, rewrite
+):
+    path = _write_registry(etc_dir, ONE_INVALID)
+    before = path.read_bytes()
+
+    with pytest.raises(RegistryError) as raised:
+        REWRITES[rewrite](ctx)
+
+    assert raised.value.exit_code == ExitCode.FAILED
+    assert raised.value.user_message == ONE_INVALID_MESSAGE
+    assert raised.value.detail == ONE_INVALID_DETAIL
+    assert path.read_bytes() == before
+    assert sorted(os.listdir(etc_dir)) == ["config.toml"]
+
+
+def test_update_refuses_before_the_change_and_then_run(ctx, etc_dir, locks_dir):
+    _write_registry(etc_dir, ONE_INVALID)
+    seen: list[str] = []
+
+    def change(current: Registry) -> Registry:
+        seen.append("change")
+        return current
+
+    with pytest.raises(RegistryError):
+        config.update(ctx, change, then=lambda _saved: seen.append("then"))
+
+    assert seen == []
+
+
+def test_every_invalid_entry_is_named_by_number_with_its_reason(
+    ctx, etc_dir, locks_dir
+):
+    """Entries 1 and 3 clash, entry 2 is a bad type; entry 4 is valid."""
+    games = volume_fields(MEDIABOX) | {"name": TEST_KEY, "fstype": "ext4"}
+    twin = volume_fields(MEDIABOX) | {"name": "TWIN", "path": f"{MOUNT_BASE}/TWIN"}
+    tables = [
+        raw_volume_table(volume_fields(MEDIABOX)),
+        raw_volume_table(games | {"uuid": "1234-ABCD", "path": f"{MOUNT_BASE}/G"}),
+        raw_volume_table(twin),
+        raw_volume_table(volume_fields(PERSONAL)),
+    ]
+    _write_registry(etc_dir, raw_registry_text(tables))
+
+    with pytest.raises(RegistryError) as raised:
+        config.update(ctx, lambda current: current)
+
+    error = raised.value
+    leaked = TEST_KEY in error.user_message + error.detail + str(error)
+    assert error.user_message == (
+        "the registry has invalid entries: [[volume]] numbers 1, 2, 3. Fix or remove"
+        " them in /etc/steamos-mounter/config.toml first"
+    )
+    assert error.detail == (
+        "registry not rewritten: [[volume]] number 1: duplicate uuid;"
+        " [[volume]] number 2: fstype: not a supported filesystem type;"
+        " [[volume]] number 3: duplicate uuid"
+    )
+    assert not leaked
+
+
+def test_a_registry_with_only_valid_entries_is_still_rewritten(ctx, etc_dir, locks_dir):
+    _write_registry(etc_dir, DESIGN_EXAMPLE)
+
+    result = config.update(ctx, lambda current: without_volume(current, "PERSONAL"))
+
+    assert result.volumes == (MEDIABOX_VOLUME,)
+    assert (etc_dir / "config.toml").read_text(encoding="utf-8") == registry_text(
+        (MEDIABOX,)
+    )

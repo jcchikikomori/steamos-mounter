@@ -11,7 +11,10 @@ State words and next steps (P2-T08, Design Doc "list and scan Output", UI
 metrics 1 and 2): every ``VolumeState``, with no reason and with every reason
 code ``state`` knows, renders words, and a next step for every non-healthy
 state; the rendered ``list`` block carries no ESC byte and no color, even when
-the volume name is hostile. Extended later: doctor lines (P5-T03).
+the volume name is hostile. Installer lines (P4-T06): every ``install`` and
+``uninstall`` line starts with its own prefix and carries no control
+character, whatever a step's detail holds. Extended later: doctor lines
+(P5-T03).
 """
 
 import io
@@ -20,10 +23,12 @@ import unicodedata
 
 import pytest
 
-from steamos_mounter import state
+from steamos_mounter import installer, state
 from steamos_mounter.errors import ExitCode
+from steamos_mounter.installer_report import InstallReport, StepLine
 from steamos_mounter.model import VolumeState
 from steamos_mounter.output import Output
+from tests.helpers.cli_env import run_cli, steamos_host
 
 TAB = "\t"
 C0 = [chr(code) for code in range(0x00, 0x20)]
@@ -188,3 +193,29 @@ def test_list_block_has_no_esc_and_no_color_even_for_a_hostile_name(pair):
     assert control_characters(text) <= {TAB, "\n"}
     assert "[31m" in text  # only the ESC byte is dropped; the rest stays visible
     assert text.count("\n") == 4
+
+
+@pytest.mark.parametrize("command", ["install", "uninstall"])
+def test_installer_lines_carry_their_prefix_and_no_controls(
+    ctx, tmp_path, monkeypatch, command
+):
+    steamos_host(tmp_path)
+    statuses = ("ok", "skipped", "busy", "failed")
+    report = InstallReport(
+        tuple(
+            StepLine(f"step{HOSTILE}", status, f"{ESC}[31mdetail{HOSTILE}")
+            for status in statuses
+        ),
+        ExitCode.PARTIAL,
+    )
+    monkeypatch.setattr(installer, command, lambda *_args, **_kwargs: report)
+
+    result = run_cli(ctx, command)
+
+    lines = result.out.splitlines()
+    assert result.code == ExitCode.PARTIAL
+    assert result.err == ""
+    assert [line.split(": ")[2] for line in lines] == list(statuses)
+    assert all(line.startswith(f"steamos-mounter {command}: step") for line in lines)
+    assert ESC not in result.out
+    assert control_characters(result.out.replace("\n", "")) == {TAB}

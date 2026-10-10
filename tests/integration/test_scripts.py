@@ -13,9 +13,15 @@ ID=debian), as the non-root container user. subprocess is allowed in tests/**
 (pyproject per-file-ignores). Nothing is mocked; the pass criterion is that the
 platform guard fires before the root guard and before any write.
 
-Gated on the scripts existing (Phase 4 adds them).
+The image has no ``/usr/bin/python3`` (python:*-slim installs it under
+``/usr/local``), so the entry point runs on ``sys.executable -I``, as its
+shebang would. ``-I`` ignores ``PYTHONDONTWRITEBYTECODE``, so ``-B`` keeps
+the child from writing ``__pycache__`` into the checkout.
 """
 
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -26,6 +32,23 @@ UNINSTALL_SH = REPO / "uninstall.sh"
 ENTRY_POINT = REPO / "bin" / "steamos-mounter"
 UNSUPPORTED = "unsupported platform: SteamOS only"
 EXIT_UNSUPPORTED_PLATFORM = 4
+ENV = {"PATH": "/usr/bin:/bin"}
+SH = "/bin/sh"  # dash in the Debian image: a strict POSIX shell
+SHELLCHECK = "/usr/bin/shellcheck"
+WATCHED = ("/etc/systemd/system", "/etc/udev/rules.d")
+ENTRY_LINE = "steamos-mounter: unsupported platform: SteamOS only.\n"
+
+
+def listing(directory: str) -> list[str] | None:
+    try:
+        return sorted(os.listdir(directory))
+    except FileNotFoundError:
+        return None
+
+
+def assert_plain(text: str) -> None:
+    """NFR-26: no ESC and no control byte but the newline (test_output.py)."""
+    assert all(char == "\n" or ord(char) >= 0x20 for char in text), repr(text)
 
 
 # AC-051: "Given a host that is not SteamOS, then the installer and the services
@@ -40,7 +63,6 @@ EXIT_UNSUPPORTED_PLATFORM = 4
 # @dependency: install.sh, uninstall.sh (real sh)
 # @complexity: low
 # @real-dependency: /bin/sh, /etc/os-release of the Docker image, tmp_path cwd
-@pytest.mark.skipif(not INSTALL_SH.exists(), reason="scripts land in Phase 4")
 @pytest.mark.parametrize(
     ("script", "prefix"),
     [
@@ -62,8 +84,9 @@ def test_scripts_exit_4_on_debian_and_create_nothing(
     When
       - subprocess.run(["sh", str(script)], cwd=tmp_path, capture_output=True,
         env=..., timeout=10)
-      - and once more with "--no-start" for install.sh (flags do not bypass
-        the guard)
+      - and once more with "--no-start" for install.sh ("--purge" for
+        uninstall.sh), and once with "--bogus" for both (flags do not bypass
+        the guard; the usage error comes after it, as in cli.main)
     Then (pass criteria)
       - returncode == EXIT_UNSUPPORTED_PLATFORM (4), not 3 (root guard never
         reached, AC-066 ordering) and not 5
@@ -76,7 +99,37 @@ def test_scripts_exit_4_on_debian_and_create_nothing(
       - shellcheck -s sh passes on the script (run in the same test or as a
         separate contract check; the Docker image ships shellcheck)
     """
-    pytest.skip("skeleton: implement in Phase 4 (scripts)")
+    flag = "--no-start" if script == INSTALL_SH else "--purge"
+    # An unknown option still gets exit 4: the platform guard comes first.
+    runs = [[], [flag], ["--bogus"]]
+    before = {directory: listing(directory) for directory in WATCHED}
+
+    for flags in runs:
+        result = subprocess.run(
+            [SH, str(script), *flags],
+            cwd=tmp_path,
+            capture_output=True,
+            env=ENV,
+            timeout=10,
+            check=False,
+        )
+        output = (result.stdout + result.stderr).decode()
+
+        assert result.returncode == EXIT_UNSUPPORTED_PLATFORM, output
+        assert output.count("\n") == 1
+        assert output.startswith(f"{prefix} ")
+        assert UNSUPPORTED in output
+        assert_plain(output)
+    assert list(tmp_path.iterdir()) == []
+    assert not os.path.lexists("/opt/steamos-mounter")
+    assert {directory: listing(directory) for directory in WATCHED} == before
+    lint = subprocess.run(
+        [SHELLCHECK, "-s", "sh", str(script)],
+        capture_output=True,
+        timeout=60,
+        check=False,
+    )
+    assert lint.returncode == 0, lint.stdout.decode()
 
 
 # SM-13: "on a non-SteamOS host (the Docker test environment), the installer and
@@ -90,7 +143,6 @@ def test_scripts_exit_4_on_debian_and_create_nothing(
 # @dependency: bin/steamos-mounter, cli (real python3 -I child process)
 # @complexity: low
 # @real-dependency: /usr/bin/python3 -I, /etc/os-release of the Docker image
-@pytest.mark.skipif(not ENTRY_POINT.exists(), reason="entry point lands in Phase 1")
 @pytest.mark.parametrize(
     "command",
     ["list", "scan", "doctor", "internal reconcile --trigger start auto /sys/x"],
@@ -118,4 +170,25 @@ def test_entry_point_exits_4_on_debian_for_every_command(
       - tmp_path stays empty; no __pycache__ is written under REPO/src by the
         child (python3 -I with PYTHONDONTWRITEBYTECODE=1 from the image)
     """
-    pytest.skip("skeleton: implement in Phase 4 (CLI skeleton + unit_entry)")
+    pycache = sorted(REPO.joinpath("src").rglob("__pycache__/*"))
+    argv = [sys.executable, "-I", "-B", str(ENTRY_POINT)]
+
+    result = subprocess.run(
+        [*argv, *command.split()], cwd=tmp_path, capture_output=True, timeout=20
+    )
+    usage = subprocess.run(
+        [*argv, "--help"], cwd=tmp_path, capture_output=True, timeout=20
+    )
+
+    assert result.returncode == EXIT_UNSUPPORTED_PLATFORM
+    assert result.stderr.decode() == ENTRY_LINE
+    assert result.stdout == b""
+    assert usage.returncode == 0, usage.stderr.decode()
+    help_text = usage.stdout.decode()
+    assert help_text.startswith("usage: steamos-mounter")
+    assert "internal" not in help_text
+    assert "--key" not in help_text
+    assert_plain(help_text)
+    assert list(tmp_path.iterdir()) == []
+    # Hygiene guard only: with -B this holds by construction.
+    assert sorted(REPO.joinpath("src").rglob("__pycache__/*")) == pycache
