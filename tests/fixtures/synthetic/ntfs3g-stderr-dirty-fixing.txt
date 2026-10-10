@@ -1,0 +1,2 @@
+# synthetic: ntfs-3g stderr for a read-write mount of a volume with an unclean $LogFile, which ntfs-3g resets; text from upstream libntfs-3g/volume.c until a V-10 capture
+The file system wasn't safely closed on Windows. Fixing.

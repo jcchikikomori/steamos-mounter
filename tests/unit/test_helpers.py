@@ -11,15 +11,17 @@ real /usr/bin/rsync for the keep-list replay.
 import json
 import os
 import re
+import stat
 import tomllib
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
+from steamos_mounter import config
 from tests.contract import test_fixtures
 from tests.contract.test_python import imported_top_levels
-from tests.helpers import builders, fixtures, rsync_replay
+from tests.helpers import builders, fixtures, flows, rsync_replay
 from tests.helpers.clock import FakeClock
 from tests.helpers.fixtures import fixture_rc, load_fixture, strip_synthetic_header
 from tests.helpers.host_tree import HostTree, SysfsDevice, parse_sysfs_facts
@@ -738,3 +740,36 @@ def test_replay_removes_its_scratch_tree(tmp_path, monkeypatch):
     rsync_replay.replay("/etc/a\n", [], {"/etc/a": None})
 
     assert list(tmp_path.iterdir()) == []
+
+
+# --- flows: the setup the reconcile tests and flows share ---------------------
+
+
+def test_flows_runtime_dirs_gives_the_records_and_locks_tree(ctx, tmp_path):
+    flows.runtime_dirs(ctx)
+
+    assert (tmp_path / "run/steamos-mounter/records/auto").is_dir()
+    assert stat.S_IMODE((tmp_path / "run/steamos-mounter/locks").stat().st_mode) == (
+        0o700
+    )
+
+
+def test_flows_registry_and_base_pass_the_package_checks(ctx, tmp_path):
+    flows.write_registry(tmp_path, builders.registry_text([builders.MEDIABOX]))
+    base = flows.make_mount_base(tmp_path)
+
+    assert [volume.name for volume in config.load(ctx).volumes] == ["MEDIABOX"]
+    assert stat.S_IMODE(base.stat().st_mode) == 0o750
+    assert stat.S_IMODE(base.parent.stat().st_mode) == 0o755
+
+
+def test_flows_registry_directory_without_a_file_is_the_empty_registry(ctx, tmp_path):
+    flows.write_registry(tmp_path, None)
+
+    assert config.load(ctx).volumes == ()
+
+
+def test_flows_known_os_set_is_read_as_known(ctx, tmp_path):
+    flows.known_os_set(tmp_path)
+
+    assert ctx.platform.os_partitions(ctx, as_root=False).known is True

@@ -20,9 +20,35 @@ Fixtures expected from tests/conftest.py: fake_runner, fake_platform, host_tree,
 fake_clock, ctx. Skipped until steamos_mounter.reconcile exists.
 """
 
+import json
+import stat
 from pathlib import Path
 
 import pytest
+from tests.helpers.fake_runner import Answer
+from tests.helpers.fixtures import load_fixture
+from tests.helpers.flows import (
+    CRYPTSETUP,
+    LOGINCTL,
+    MOUNT,
+    NTFS3G,
+    PROBE,
+    SETFACL,
+    SYSTEMD_RUN,
+    TABLE_ARGV,
+    known_os_set,
+    make_var_run,
+    read_record,
+    readback_argv,
+    runtime_dirs,
+    script_lsblk,
+    write_registry,
+)
+from tests.helpers.host_tree import SysfsDevice
+
+from steamos_mounter import blockdev, config, mounts, naming, state
+from steamos_mounter.model import InstanceKind, Trigger, VolumeState
+from steamos_mounter.routing import Action
 
 reconcile = pytest.importorskip("steamos_mounter.reconcile")
 mounter = pytest.importorskip("steamos_mounter.mounter")
@@ -40,6 +66,19 @@ SDC1_RECORD = "run/steamos-mounter/records/auto/sdc1-8_33.json"
 EXFAT_OPTIONS = (
     "nosuid,nodev,uid=1000,gid=1000,umask=0022,iocharset=utf8,errors=remount-ro"
 )
+GAMES_EXFAT_RW = "findmnt-games-exfat-rw.json"
+
+
+def table_with_games() -> Answer:
+    """The real mount list plus the GAMES read-back row: what list sees after."""
+    document = json.loads(load_fixture("findmnt-real-list.json"))
+    games = json.loads(load_fixture(GAMES_EXFAT_RW))["filesystems"]
+    document["filesystems"].extend(games)
+    return Answer(stdout=json.dumps(document).encode(), returncode=0)
+
+
+def mode_of(path: Path) -> int:
+    return stat.S_IMODE(path.stat().st_mode)
 
 
 @pytest.fixture
@@ -75,7 +114,9 @@ def expected_mount_argv() -> tuple[str, ...]:
 # @complexity: medium
 # @real-dependency: tmp_path /run/media (created by the flow), flock (holo lock
 #   /var/run/jupiter-automount-sdc1.lock and locks/volume-1234-abcd.lock), record
-def test_unregistered_exfat_games_mounts_with_nosuid_nodev(tmp_path: Path) -> None:
+def test_unregistered_exfat_games_mounts_with_nosuid_nodev(
+    tmp_path: Path, ctx, host_tree, fake_runner, expected_mount_argv
+) -> None:
     """Design Doc "Unregistered Plug-in (exFAT stick GAMES)" end to end.
 
     Given
@@ -116,4 +157,65 @@ def test_unregistered_exfat_games_mounts_with_nosuid_nodev(tmp_path: Path) -> No
       - state.compute_views(...) lists GAMES after the registered volumes with
         words "mounted read-write" and next step "-" (AC-040)
     """
-    pytest.skip("skeleton: implement in Phase 3 (mount engine)")
+    runtime_dirs(ctx)
+    write_registry(tmp_path, None)  # good directory, no config.toml (I001)
+    known_os_set(tmp_path)
+    host_tree.link_by_partsets("rootfs-A", "nvme0n1p4")
+    make_var_run(tmp_path)
+    host_tree.add_block(SysfsDevice(kname="sdc", devnum="8:32"))
+    host_tree.add_block(
+        SysfsDevice(kname="sdc1", devnum="8:33", parent="sdc", syspath=SDC1_SYSPATH)
+    )
+    base_before_mount = []
+
+    def note_the_base(_command) -> None:
+        media = tmp_path / "run/media"
+        base_before_mount.append((mode_of(media), mode_of(media / "deck")))
+
+    script_lsblk(fake_runner, "lsblk-tree-with-exfat-sdc1.json")
+    fake_runner.on(TABLE_ARGV, "findmnt-real-list.json", table_with_games())
+    fake_runner.on(SETFACL, Answer())
+    fake_runner.on(MOUNT, Answer(), hook=note_the_base)
+    fake_runner.on(
+        readback_argv(GAMES_PATH), Answer.from_fixture(GAMES_EXFAT_RW, returncode=0)
+    )
+
+    outcome = reconcile.run(ctx, InstanceKind.AUTO, SDC1_SYSPATH, Trigger.START)
+
+    assert outcome.route.action is Action.AUTO_MOUNT
+    assert outcome.state is VolumeState.MOUNTED_RW
+    assert base_before_mount == [(0o755, 0o750)]
+    tools = [argv[0] for argv in fake_runner.argvs]
+    assert tools.index(SETFACL) < tools.index(MOUNT)
+    assert fake_runner.argvs[tools.index(SETFACL)] == (
+        SETFACL,
+        "-m",
+        "u:1000:r-x",
+        "/run/media/deck",
+    )
+    assert [argv for argv in fake_runner.argvs if argv[0] == MOUNT] == [
+        expected_mount_argv
+    ]
+    assert {PROBE, NTFS3G, CRYPTSETUP}.isdisjoint(tools)
+    assert not any("noexec" in item for argv in fake_runner.argvs for item in argv)
+    assert expected_mount_argv[-1] == "/run/media/deck/" + naming.sanitize_label(
+        "GAMES"
+    )
+    assert (tmp_path / "var/run/jupiter-automount-sdc1.lock").exists()
+    record = read_record(tmp_path, SDC1_RECORD)
+    assert (record["kind"], record["key"], record["name"]) == (
+        "auto",
+        "sdc1-8_33",
+        "GAMES",
+    )
+    assert (record["state"], record["warning"]) == ("MountedRW", None)
+    assert (record["mount"]["driver"], record["mount"]["mode"]) == ("exfat", "rw")
+    assert record["mount"]["created_dir"] is True
+    assert record["mapping"] is None
+    assert {LOGINCTL, SYSTEMD_RUN}.isdisjoint(tools)  # healthy: no notification
+    views = state.compute_views(
+        ctx, config.load(ctx), blockdev.read_tree(ctx), mounts.table(ctx)
+    )
+    assert [view.name for view in views] == ["GAMES"]  # no registered volume
+    assert state.words(views[0].state, views[0].reason) == "mounted read-write"
+    assert views[0].next_step == "-"

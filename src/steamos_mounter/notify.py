@@ -20,6 +20,10 @@ Design Doc "Notifications", DD-19, AC-046, AC-047 and ADR-0005 D3 item 8.
   ``DBUS_SESSION_BUS_ADDRESS``; 15 s at most and never ``-A`` or ``-w``,
   which wait for the user. A failure is one WARNING with ``SM_EVENT=notify``
   and changes nothing else (AC-047).
+- **Time budget**: a caller with a deadline (a ``ctx.clock.monotonic()``
+  time) passes it on; the send then takes at most what is left of it, and
+  with nothing left it is skipped with that same WARNING (``out_of_time``),
+  never an exception.
 
 The caller sends only when ``session.check(need_display=False)`` says
 ``DESKTOP`` (DD-19).
@@ -46,6 +50,7 @@ NOTIFY_EVENTS: Final = frozenset({"reconcile", "key"})
 NTFS3G_DRIVER: Final = "ntfs-3g"
 MARKUP_CHARACTERS: Final = str.maketrans(dict.fromkeys("<>&", "_"))
 NOTIFY_FAILED: Final = "notification not sent"
+NO_TIME_LEFT: Final = "no time left before the unit's start timeout"
 
 Urgency = Literal["normal", "critical"]
 
@@ -97,12 +102,30 @@ def notice_for(view: "VolumeView", *, event: str) -> Notice | None:
     )
 
 
-def send(ctx: "Context", notice: Notice) -> bool:
+def out_of_time(ctx: "Context", deadline: float | None) -> bool:
+    """True when ``deadline`` has passed; the skip is then logged like a failure.
+
+    No deadline is never late.
+    """
+    if deadline is None or ctx.clock.monotonic() < deadline:
+        return False
+    _log_failure(NO_TIME_LEFT)
+    return True
+
+
+def send(ctx: "Context", notice: Notice, *, deadline: float | None = None) -> bool:
     """Show ``notice`` in the session user's desktop; False when that failed.
 
     A failure is logged at WARNING with ``SM_EVENT=notify`` and is otherwise
     ignored (AC-047). A secret in the text raises ``SecretHandlingError``.
+    With a ``deadline`` the send takes ``SEND_TIMEOUT`` at most and never runs
+    past it; once it has passed nothing runs (``out_of_time``).
     """
+    if out_of_time(ctx, deadline):
+        return False
+    timeout = SEND_TIMEOUT
+    if deadline is not None:
+        timeout = min(timeout, deadline - ctx.clock.monotonic())
     user = ctx.platform.session_user()
     tools = ctx.platform.tools
     argv = (
@@ -122,7 +145,7 @@ def send(ctx: "Context", notice: Notice) -> bool:
     )
     command = Command(
         argv=argv,
-        timeout=SEND_TIMEOUT,
+        timeout=timeout,
         env_extra={
             "XDG_RUNTIME_DIR": user.runtime_dir,
             "DBUS_SESSION_BUS_ADDRESS": user.bus_address,

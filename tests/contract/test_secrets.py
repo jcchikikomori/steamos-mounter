@@ -25,27 +25,52 @@ stderr) and ``open_with_file``. The key may be found only in the fake
 cryptsetup stdin and in the 0600 key file: never in an argv, the environment,
 any other file under the test root, the logs or the terminal.
 
+The reconcile half (P3-T06) runs the stored-key unlock through
+``reconcile.run``, once opening and mounting and once rejected: the handler
+names the key file to cryptsetup and never opens it, so the key is found
+only in that file.
+
 Assertions compare booleans computed beforehand, so a failing test never
 prints the bytes. Extended by later phases: ``add``, ``set-key`` and the key
 unit.
 """
 
+import builtins
 import errno
 import io
 import logging
+import os
 import socket
 from collections.abc import Iterator
 
 import pytest
 
-from steamos_mounter import bitlocker, keystore
+from steamos_mounter import bitlocker, keystore, reconcile
 from steamos_mounter.bitlocker import UnlockOutcome
 from steamos_mounter.errors import SecretHandlingError, UsageError
 from steamos_mounter.journal import NOTICE, fields
 from steamos_mounter.keystore import KeyStatus
+from steamos_mounter.model import InstanceKind, Trigger, VolumeState
 from steamos_mounter.runner import Command, CommandResult, SubprocessRunner
 from steamos_mounter.sensitive import SecretBytes
+from tests.helpers.builders import MEDIABOX, PERSONAL, registry_text
 from tests.helpers.fake_runner import Answer
+from tests.helpers.flows import (
+    LSBLK_ARGV,
+    MOUNT,
+    PROBE,
+    SYSTEMCTL,
+    TABLE_ARGV,
+    lock_sdb1,
+    make_mount_base,
+    make_var_run,
+    readback_argv,
+    runtime_dirs,
+    script_desktop_session,
+    script_lsblk,
+    write_key_file,
+    write_registry,
+)
 
 TEST_KEY = b"TEST-KEY-7f3a9c-do-not-leak"
 # BitLocker recovery-key shape: eight groups of six digits.
@@ -367,3 +392,133 @@ def test_refused_key_input_never_carries_the_key(runner_logs, capsys, value):
         or value.decode() in terminal.out + terminal.err
     )
     assert not found
+
+
+# --- reconcile: the stored-key unlock (P3-T06) -------------------------------------
+
+PERSONAL_DEVICE_PATH = f"/dev/disk/by-uuid/{CONTAINER_UUID}"
+PERSONAL_PATH = "/run/media/deck/PERSONAL"
+TOOL_MAPPING = f"steamos-mounter-{CONTAINER_UUID}"
+LOCKED_TREE = Answer.from_fixture("lsblk-tree-personal-locked.json", returncode=0)
+
+
+@pytest.fixture
+def opened_paths(monkeypatch) -> list[str]:
+    """Every path ``open``, ``io.open`` or ``os.open`` is asked for, in order.
+
+    Python reads a file only through one of these, so a key file that is
+    never among them was never read into Python (``lstat`` is not an open).
+    """
+    seen: list[str] = []
+
+    def watching(real):
+        def opener(file, *args, **kwargs):
+            if isinstance(file, str | bytes | os.PathLike):
+                seen.append(os.fsdecode(file))
+            return real(file, *args, **kwargs)
+
+        return opener
+
+    monkeypatch.setattr(builtins, "open", watching(builtins.open))
+    monkeypatch.setattr(io, "open", watching(io.open))
+    monkeypatch.setattr(os, "open", watching(os.open))
+    return seen
+
+
+def given_personal_locked_with_a_stored_key(ctx, host_tree, tmp_path, fake_runner):
+    """PERSONAL registered and plugged in locked, its key file 0600; the open hook."""
+    runtime_dirs(ctx)
+    write_registry(tmp_path, registry_text([MEDIABOX, PERSONAL]))
+    host_tree.add_sysfs_facts()
+    host_tree.link_by_uuid(CONTAINER_UUID, "sdb1")
+    make_mount_base(tmp_path)
+    make_var_run(tmp_path)
+    opened = lock_sdb1(tmp_path, TOOL_MAPPING)
+    write_key_file(tmp_path, CONTAINER_UUID, TEST_KEY)
+    fake_runner.on(LSBLK_ARGV, LOCKED_TREE)
+    script_lsblk(fake_runner, "lsblk-columns-tree.json")
+    return opened
+
+
+@pytest.mark.parametrize("cryptsetup", ["opens", "rejects"])
+def test_stored_key_unlock_never_reads_or_shows_the_key(
+    logging_setup,
+    ctx,
+    fake_runner,
+    host_tree,
+    tmp_path,
+    capsys,
+    caplog,
+    opened_paths,
+    cryptsetup,
+):
+    """AC-013, NFR-09: the handler hands cryptsetup a path and never the bytes.
+
+    A stored-key unlock that opens and mounts, and one that cryptsetup
+    rejects (the key unit is started), leave the key only in the key file:
+    not in an argv, the environment, a stdin, the logs, the terminal, a
+    record or the registry. The handler never opens the key file at all.
+    """
+    stream = io.StringIO()
+    logging_setup("handler", journal_socket=str(tmp_path / "missing"), stderr=stream)
+    logging.getLogger().addHandler(caplog.handler)
+    opened = given_personal_locked_with_a_stored_key(
+        ctx, host_tree, tmp_path, fake_runner
+    )
+    key_file = str(keystore.key_path(ctx, CONTAINER_UUID))
+    if cryptsetup == "opens":
+        fake_runner.on(CRYPTSETUP, Answer(), hook=opened)
+        fake_runner.on(TABLE_ARGV, "findmnt-real-list.json")
+        fake_runner.on(PROBE, Answer())
+        fake_runner.on(MOUNT, Answer())
+        fake_runner.on(
+            readback_argv(PERSONAL_PATH),
+            Answer.from_fixture("findmnt-personal-ntfs3-rw.json", returncode=0),
+        )
+    else:
+        fake_runner.on(CRYPTSETUP, Answer(returncode=2))
+        script_desktop_session(fake_runner)
+        fake_runner.on((SYSTEMCTL, "start", "--no-block"), Answer())
+    opened_paths.clear()  # the setup wrote the key file; the pass starts here
+
+    outcome = reconcile.run(
+        ctx, InstanceKind.REGISTERED, PERSONAL_DEVICE_PATH, Trigger.START
+    )
+
+    # By basename: a dir_fd-relative open passes only the file name.
+    key_was_opened = any(
+        os.path.basename(path) == f"{CONTAINER_UUID}.key" for path in opened_paths
+    )
+    text = TEST_KEY.decode()
+    calls = fake_runner.calls
+    in_calls = any(
+        text in item
+        for call in calls
+        for item in (*call.argv, *call.env_extra, *call.env_extra.values())
+    ) or any(call.stdin is not None for call in calls)
+    terminal = capsys.readouterr()
+    in_logs = (
+        TEST_KEY in stream.getvalue().encode()
+        or TEST_KEY in caplog.text.encode()
+        or text in terminal.out + terminal.err
+    )
+    holders = files_holding(tmp_path, TEST_KEY)
+    expected = {
+        "opens": VolumeState.MOUNTED_RW,
+        "rejects": VolumeState.NEEDS_KEY,
+    }[cryptsetup]
+    key_unit_starts = {"opens": 0, "rejects": 1}[cryptsetup]
+    starts = [
+        call.argv
+        for call in calls
+        if call.argv[:3] == (SYSTEMCTL, "start", "--no-block")
+    ]
+    assert outcome.state is expected
+    assert len(starts) == key_unit_starts  # "rejects" reached the key unit start
+    assert not key_was_opened
+    assert not in_calls
+    assert not in_logs
+    assert holders == [f"{KEYS_DIR}/{CONTAINER_UUID}.key"]
+    [open_call] = [call.argv for call in calls if call.argv[0] == CRYPTSETUP]
+    assert open_call[4:6] == ("--key-file", key_file)
+    assert stream.getvalue()  # the pass did log, through the redacting handler

@@ -388,3 +388,63 @@ def test_need_display_raises_until_the_display_half_lands(ctx, fake_runner):
         check(ctx, need_display=True)
 
     assert fake_runner.calls == []
+
+
+# --- check: the time budget (a deadline on ctx.clock.monotonic()) ---------------------
+
+
+def test_each_query_takes_at_most_what_is_left_of_the_deadline(
+    ctx, fake_runner, fake_clock
+):
+    fake_runner.on(SHOW_USER, USER_CAPTURE, hook=lambda _c: fake_clock.advance(4))
+    fake_runner.on(SHOW_SEAT, SEAT_CAPTURE, hook=lambda _c: fake_clock.advance(4))
+    fake_runner.on((LOGINCTL, "show-session"), SESSION_CAPTURE)
+
+    result = check(ctx, need_display=False, deadline=fake_clock.monotonic() + 12)
+
+    assert result.verdict is Verdict.DESKTOP
+    assert [call.timeout for call in fake_runner.calls] == [10.0, 8.0, 4.0]
+
+
+def test_without_a_deadline_each_query_keeps_its_own_timeout(
+    ctx, fake_runner, fake_clock
+):
+    script_deck(fake_runner)
+    fake_clock.advance(10_000)
+
+    result = check(ctx, need_display=False)
+
+    assert result.verdict is Verdict.DESKTOP
+    assert [call.timeout for call in fake_runner.calls] == [10.0, 10.0, 10.0]
+
+
+def test_no_query_runs_once_the_deadline_has_passed(
+    ctx, fake_runner, fake_clock, caplog
+):
+    deadline = fake_clock.monotonic()
+
+    with caplog.at_level(logging.DEBUG, logger=LOGGER):
+        result = check(ctx, need_display=False, deadline=deadline)
+
+    assert result.verdict is Verdict.NOT_SURE
+    assert result.session_id is None
+    assert fake_runner.calls == []
+    assert [(r.levelname, r.getMessage()) for r in caplog.records] == [
+        ("NOTICE", "session not recognized: no time left for loginctl show-user")
+    ]
+
+
+def test_a_deadline_passing_between_queries_stops_the_check(
+    ctx, fake_runner, fake_clock, caplog
+):
+    fake_runner.on(SHOW_USER, USER_CAPTURE, hook=lambda _c: fake_clock.advance(10))
+
+    with caplog.at_level(logging.DEBUG, logger=LOGGER):
+        result = check(ctx, need_display=False, deadline=fake_clock.monotonic() + 10)
+
+    assert result.verdict is Verdict.NOT_SURE
+    assert result.session_id == "5"
+    assert fake_runner.argvs == [SHOW_USER]
+    assert [r.getMessage() for r in caplog.records] == [
+        "session not recognized: no time left for loginctl show-seat"
+    ]

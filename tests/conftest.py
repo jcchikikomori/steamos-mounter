@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from steamos_mounter import blockdev
 from steamos_mounter.context import Context
 from steamos_mounter.journal import JournalHandler, setup_logging
 from steamos_mounter.platforms.base import HostPaths
@@ -101,6 +102,16 @@ def ctx_deck(
         euid=DECK_UID,
         invocation_id=None,
     )
+
+
+@pytest.fixture
+def no_holders(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fails the test when anything reads sysfs ``holders/`` (ADR-0001 guidance 10)."""
+
+    def forbidden(*_args: object) -> list[str]:
+        raise AssertionError("teardown read sysfs holders/")
+
+    monkeypatch.setattr(blockdev, "holders", forbidden)
 
 
 @pytest.fixture

@@ -23,7 +23,6 @@ from steamos_mounter.context import Context, SystemClock, build_context
 from steamos_mounter.errors import MounterError, UnsupportedPlatformError
 from steamos_mounter.platforms.base import HostPaths
 from steamos_mounter.runner import SubprocessRunner
-from tests.helpers.fake_kmsg import FakeKernelLog
 
 RELEASE = "/opt/steamos-mounter/releases/0.1.0-20261009T000000Z"
 INVOCATION_ID = "0f6c9c1e5c7a4c51a0a5f3f3b2b6d7e8"
@@ -49,15 +48,14 @@ def production(monkeypatch: pytest.MonkeyPatch, fake_platform) -> None:
     """The pieces Docker cannot provide, swapped at their seams.
 
     The Docker image is Debian, so platform detection is pointed at the fake
-    platform; ``DevKmsg`` lands in task 20, so a fake kernel log stands in;
-    the root logger is emptied so the handler ``build_context`` installs is
-    dropped again at teardown.
+    platform; the root logger is emptied so the handler ``build_context``
+    installs is dropped again at teardown. ``DevKmsg`` stays real: it opens
+    ``/dev/kmsg`` only on its first ``mark()``, which these tests never call.
     """
     root = logging.getLogger()
     monkeypatch.setattr(root, "handlers", [])
     monkeypatch.setattr(root, "level", root.level)
     monkeypatch.setattr(context, "current_platform", lambda paths: fake_platform)
-    monkeypatch.setattr(kmsg, "DevKmsg", FakeKernelLog, raising=False)
     monkeypatch.delenv("INVOCATION_ID", raising=False)
 
 
@@ -163,7 +161,7 @@ def test_build_context_wires_the_production_pieces(monkeypatch, fake_platform):
     assert ctx.platform is fake_platform
     assert ctx.paths == HostPaths()
     assert isinstance(ctx.clock, SystemClock)
-    assert isinstance(ctx.kmsg, FakeKernelLog)
+    assert isinstance(ctx.kmsg, kmsg.DevKmsg)
     assert ctx.invocation_id is None
     assert ctx.release_root is None
 

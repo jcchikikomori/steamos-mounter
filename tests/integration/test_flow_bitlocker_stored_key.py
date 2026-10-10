@@ -20,11 +20,47 @@ with the tool's mapping name so the dm-0 auto instance routes OWN_MAPPING.
 
 Fixtures expected from tests/conftest.py: fake_runner, fake_platform, host_tree,
 fake_kmsg, fake_clock, ctx. Skipped until steamos_mounter.reconcile exists.
+
+The key file's path in argv is the host path under ``tmp_path``
+(``keystore.key_path``), which is ``/var/lib/steamos-mounter/keys/...`` on
+the Deck.
 """
 
+import logging
 from pathlib import Path
 
 import pytest
+from tests.helpers.builders import MEDIABOX, PERSONAL, registry_text
+from tests.helpers.fake_runner import Answer
+from tests.helpers.flows import (
+    CRYPTSETUP,
+    LOGINCTL,
+    LSBLK_ARGV,
+    MOUNT,
+    NTFS3G,
+    PROBE,
+    SYSTEMCTL,
+    SYSTEMD_RUN,
+    TABLE_ARGV,
+    lock_sdb1,
+    make_keys_dir,
+    make_mount_base,
+    make_var_run,
+    read_record,
+    readback_argv,
+    runtime_dirs,
+    script_desktop_session,
+    script_lsblk,
+    script_no_session,
+    script_notify,
+    sm_fields,
+    write_key_file,
+    write_registry,
+)
+
+from steamos_mounter.journal import NOTICE
+from steamos_mounter.model import InstanceKind, Trigger, VolumeState
+from steamos_mounter.routing import Action
 
 reconcile = pytest.importorskip("steamos_mounter.reconcile")
 keystore = pytest.importorskip("steamos_mounter.keystore")
@@ -43,10 +79,19 @@ KEY_FILE = f"var/lib/steamos-mounter/keys/{PERSONAL_UUID}.key"
 DM0_SYSPATH = "/sys/devices/virtual/block/dm-0"
 DM0_RECORD = "run/steamos-mounter/records/auto/dm-0-252_0.json"
 TEST_KEY = b"TEST-KEY-7f3a9c-do-not-leak"
+CLI_ROOT = "sudo /opt/steamos-mounter/bin/steamos-mounter"
+NTFS_RW_OPTIONS = "nosuid,nodev,uid=1000,gid=1000,umask=0022,windows_names"
+LOCKED_TREE = Answer.from_fixture("lsblk-tree-personal-locked.json", returncode=0)
+START_KEY_UNIT = (SYSTEMCTL, "start", "--no-block", "--", KEY_UNIT)
+NO_SESSION_STEP = (
+    f"In Desktop Mode, replug the drive or run {CLI_ROOT} mount --volume PERSONAL."
+    f" Or run {CLI_ROOT} set-key PERSONAL."
+)
+PERMISSIONS_STEP = f"Run {CLI_ROOT} doctor, then {CLI_ROOT} set-key PERSONAL."
 
 
 @pytest.fixture
-def expected_open_argv() -> tuple[str, ...]:
+def expected_open_argv(tmp_path: Path) -> tuple[str, ...]:
     """cryptsetup open with the stored key file (Design Doc "BitLocker Unlock").
 
     The handler never reads the key into Python: the call carries the file
@@ -58,10 +103,46 @@ def expected_open_argv() -> tuple[str, ...]:
         "--type",
         "bitlk",
         "--key-file",
-        f"/var/lib/steamos-mounter/keys/{PERSONAL_UUID}.key",
+        str(tmp_path / KEY_FILE),
         "/dev/sdb1",
         MAPPING_NAME,
     )
+
+
+def given_personal_plugged_in_locked(ctx, tmp_path: Path, host_tree):
+    """Registry with MEDIABOX and PERSONAL, the Deck's sysfs without dm-0 on sdb1.
+
+    Returns the hook that does to sysfs what ``cryptsetup open`` does.
+    """
+    runtime_dirs(ctx)
+    write_registry(tmp_path, registry_text([MEDIABOX, PERSONAL]))
+    host_tree.add_sysfs_facts()
+    host_tree.link_by_uuid(PERSONAL_UUID, "sdb1")
+    make_mount_base(tmp_path)
+    make_var_run(tmp_path)
+    return lock_sdb1(tmp_path, MAPPING_NAME)
+
+
+def key_bytes_anywhere(fake_runner, caplog, tmp_path: Path) -> bool:
+    """TEST_KEY in an argv, env value, stdin, the logs, a record or the registry.
+
+    A boolean, so a failing assertion never prints the key.
+    """
+    text = TEST_KEY.decode()
+    in_calls = any(
+        text in item for call in fake_runner.calls for item in call.argv
+    ) or any(
+        any(text in value for value in call.env_extra.values())
+        or (call.stdin is not None and TEST_KEY in call.stdin)
+        for call in fake_runner.calls
+    )
+    in_logs = TEST_KEY in caplog.text.encode() or any(
+        text in str(sm_fields(record)) for record in caplog.records
+    )
+    state_files = [*(tmp_path / "run/steamos-mounter/records").rglob("*.json")]
+    state_files.append(tmp_path / "etc/steamos-mounter/config.toml")
+    in_files = any(TEST_KEY in path.read_bytes() for path in state_files)
+    return in_calls or in_logs or in_files
 
 
 # AC-010: "Given PERSONAL is registered with a valid key, when it is plugged in,
@@ -81,7 +162,7 @@ def expected_open_argv() -> tuple[str, ...]:
 # @real-dependency: tmp_path key file (0600, test uid), keys dir (0700), records,
 #   sysfs slaves/holders/dm name, flock
 def test_stored_key_unlocks_personal_and_mounts_inner_at_fixed_path(
-    tmp_path: Path,
+    tmp_path: Path, ctx, host_tree, fake_runner, caplog, expected_open_argv
 ) -> None:
     """Design Doc "BitLocker with Stored Key (PERSONAL)" end to end.
 
@@ -127,7 +208,70 @@ def test_stored_key_unlocks_personal_and_mounts_inner_at_fixed_path(
         tests/contract/test_secrets.py)
       - no systemctl start of KEY_UNIT, no loginctl call, no notification
     """
-    pytest.skip("skeleton: implement in Phase 3 (mount engine)")
+    caplog.set_level(logging.DEBUG)
+    opened = given_personal_plugged_in_locked(ctx, tmp_path, host_tree)
+    write_key_file(tmp_path, PERSONAL_UUID, TEST_KEY)
+    written_ahead = []
+
+    def cryptsetup_opens(command) -> None:
+        written_ahead.append(read_record(tmp_path, PERSONAL_RECORD)["mapping"])
+        opened(command)
+
+    fake_runner.on(LSBLK_ARGV, LOCKED_TREE)
+    script_lsblk(fake_runner, "lsblk-columns-tree.json")
+    fake_runner.on(TABLE_ARGV, "findmnt-real-list.json")
+    fake_runner.on(CRYPTSETUP, Answer(), hook=cryptsetup_opens)
+    fake_runner.on(PROBE, Answer())
+    fake_runner.on(MOUNT, Answer())
+    fake_runner.on(
+        readback_argv(PERSONAL_PATH),
+        Answer.from_fixture("findmnt-personal-ntfs3-rw.json", returncode=0),
+    )
+
+    first = reconcile.run(
+        ctx, InstanceKind.REGISTERED, PERSONAL_DEVICE_PATH, Trigger.START
+    )
+    first_pass = len(fake_runner.calls)
+    second = reconcile.run(ctx, InstanceKind.AUTO, DM0_SYSPATH, Trigger.START)
+
+    assert first.route.action is Action.UNLOCK_REGISTERED
+    assert first.state is VolumeState.MOUNTED_RW
+    assert first.reason in {None, "", "clean"}
+    [open_call] = [call for call in fake_runner.calls if call.argv[0] == CRYPTSETUP]
+    assert open_call.argv == expected_open_argv
+    assert (open_call.stdin, open_call.secret_stdin) == (None, False)
+    assert [mapping["name"] for mapping in written_ahead] == [MAPPING_NAME]  # DD-10
+    record = read_record(tmp_path, PERSONAL_RECORD)
+    assert record["mapping"] == {
+        "name": MAPPING_NAME,
+        "kname": "dm-0",
+        "devnum": "252:0",
+        "opened_by": "handler",
+        "key_unit_invocation_id": None,
+        "save_pending": False,
+    }
+    assert (
+        record["mount"]["device"],
+        record["mount"]["target"],
+        record["mount"]["driver"],
+    ) == ("/dev/dm-0", PERSONAL_PATH, "ntfs3")
+    assert [argv for argv in fake_runner.argvs if argv[0] in {PROBE, MOUNT}] == [
+        (PROBE, "--readwrite", "/dev/dm-0"),
+        (MOUNT, "-i", "-t", "ntfs3", "-o", NTFS_RW_OPTIONS, "/dev/dm-0", PERSONAL_PATH),
+    ]
+    under_base = {
+        item
+        for argv in fake_runner.argvs
+        for item in argv
+        if item.startswith("/run/media/deck/")
+    }
+    assert under_base == {PERSONAL_PATH}  # AC-059
+    assert second.route.action is Action.OWN_MAPPING
+    assert fake_runner.argvs[first_pass:] == [LSBLK_ARGV]
+    assert not (tmp_path / DM0_RECORD).exists()
+    assert not key_bytes_anywhere(fake_runner, caplog, tmp_path)
+    used = {argv[0] for argv in fake_runner.argvs}
+    assert used.isdisjoint({SYSTEMCTL, LOGINCTL, SYSTEMD_RUN})
 
 
 # AC-014: "Given a wrong or missing stored key, when the volume is plugged in,
@@ -150,8 +294,7 @@ def test_stored_key_unlocks_personal_and_mounts_inner_at_fixed_path(
     ["rejected", "missing", "bad-permissions", "no-session"],
 )
 def test_stored_key_failure_tried_once_then_key_unit_or_needs_key(
-    case: str,
-    tmp_path: Path,
+    case: str, tmp_path: Path, ctx, host_tree, fake_runner, caplog
 ) -> None:
     """One attempt, then NeedsKey; the key unit replaces the notification.
 
@@ -179,8 +322,77 @@ def test_stored_key_failure_tried_once_then_key_unit_or_needs_key(
         deferred, AC-074); state.next_step says "In Desktop Mode, replug ... or
         ... mount --volume PERSONAL ... or ... set-key PERSONAL" (AC-075)
       - no mount, probe or ntfs-3g call in any case; the key file is byte-for-
-        byte unchanged where it existed
+        byte unchanged where it existed, and "missing" leaves no key file
       - caplog has a NOTICE or WARNING entry with SM_STATE=NeedsKey and the
         reason (AC-041); TEST_KEY appears nowhere in the log
     """
-    pytest.skip("skeleton: implement in Phase 3 (mount engine)")
+    caplog.set_level(logging.DEBUG)
+    given_personal_plugged_in_locked(ctx, tmp_path, host_tree)
+    key_file = tmp_path / KEY_FILE
+    if case == "missing":
+        make_keys_dir(tmp_path)
+    else:
+        write_key_file(
+            tmp_path,
+            PERSONAL_UUID,
+            TEST_KEY,
+            mode=0o644 if case == "bad-permissions" else 0o600,
+        )
+    script_lsblk(fake_runner, "lsblk-tree-personal-locked.json")
+    fake_runner.on(CRYPTSETUP, Answer(returncode=2))
+    if case == "no-session":
+        script_no_session(fake_runner)
+    else:
+        script_desktop_session(fake_runner)
+    fake_runner.on(START_KEY_UNIT, Answer())
+    script_notify(fake_runner)
+    expected_reason = {
+        "rejected": "stored_key_rejected",
+        "missing": "stored_key_missing",
+        "bad-permissions": "key_permissions",
+        "no-session": "no_session",
+    }[case]
+
+    outcome = reconcile.run(
+        ctx, InstanceKind.REGISTERED, PERSONAL_DEVICE_PATH, Trigger.START
+    )
+
+    opens = [argv for argv in fake_runner.argvs if argv[0] == CRYPTSETUP]
+    tried = 1 if case in {"rejected", "no-session"} else 0
+    assert len(opens) == tried  # AC-014: no retry loop
+    assert (outcome.state, outcome.reason) == (VolumeState.NEEDS_KEY, expected_reason)
+    record = read_record(tmp_path, PERSONAL_RECORD)
+    assert (record["state"], record["reason"]) == ("NeedsKey", expected_reason)
+    starts = [argv for argv in fake_runner.argvs if argv[:2] == (SYSTEMCTL, "start")]
+    notices = [argv for argv in fake_runner.argvs if argv[0] == SYSTEMD_RUN]
+    if case in {"rejected", "missing"}:
+        assert starts == [START_KEY_UNIT]
+        assert notices == []  # the dialog replaces it (AC-014, AC-046)
+    elif case == "bad-permissions":
+        assert starts == []
+        [notice] = notices
+        assert "PERSONAL needs a key" in notice
+        assert notice[-1].endswith(PERMISSIONS_STEP)  # DD-18: doctor, then set-key
+        assert record["next_step"] == PERMISSIONS_STEP
+    else:
+        assert (starts, notices) == ([], [])  # Game Mode notice deferred (AC-074)
+        assert record["next_step"] == NO_SESSION_STEP  # AC-075
+        # The Design Doc's "list and scan Output" example, word for word.
+        assert record["warning"] == (
+            "The stored key did not work, and there was no Desktop Mode session"
+            " for the key dialog."
+        )
+    used = {argv[0] for argv in fake_runner.argvs}
+    assert used.isdisjoint({MOUNT, PROBE, NTFS3G})
+    if case == "missing":
+        assert not key_file.exists()  # nothing invents a key file
+    else:
+        assert key_file.read_bytes() == TEST_KEY
+    logged = [
+        r
+        for r in caplog.records
+        if r.levelno in {logging.WARNING, NOTICE}
+        and sm_fields(r).get("SM_STATE") == "NeedsKey"
+    ]
+    assert {sm_fields(r)["SM_REASON"] for r in logged} == {expected_reason}
+    assert not key_bytes_anywhere(fake_runner, caplog, tmp_path)

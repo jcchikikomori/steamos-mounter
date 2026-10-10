@@ -255,11 +255,15 @@ def _driver(mount: MountInfo | None) -> str | None:
 
 # Reason codes, per state, that the components record (Design Doc: Routing,
 # UNLOCK_REGISTERED executor, Key Dialog Unit, Read-back and State, Locks,
-# Names and Paths, I006). A known code without its own entry below uses the
-# state's default words or step.
+# Names and Paths, I006, and teardown's fallback sweep for an unreadable
+# record). A known code without its own entry below uses the state's default
+# words or step.
 KNOWN_REASONS: Final[Mapping[VolumeState, frozenset[str]]] = MappingProxyType(
     {
-        VolumeState.NOT_MOUNTED: frozenset({"no_partition_instance"}),
+        VolumeState.NOT_PRESENT: frozenset({"record_unreadable"}),
+        VolumeState.NOT_MOUNTED: frozenset(
+            {"no_partition_instance", "record_unreadable"}
+        ),
         VolumeState.NEEDS_KEY: frozenset(
             {
                 "stored_key_missing",
@@ -286,6 +290,7 @@ KNOWN_REASONS: Final[Mapping[VolumeState, frozenset[str]]] = MappingProxyType(
                 "registry_entry_invalid",
                 "os_partition",
                 "unknown",
+                "internal_error",  # the top-level catch of a unit (Internal Verbs)
             }
         ),
     }
@@ -310,8 +315,11 @@ _WORDS: Final[Mapping[VolumeState, str]] = MappingProxyType(
         VolumeState.UNMOUNTED_BY_USER: "unmounted by the user",
     }
 )
+_RECORD_UNREADABLE: Final = "its state record was unreadable"
 _REASON_WORDS: Final[Mapping[tuple[VolumeState, str], str]] = MappingProxyType(
     {
+        (VolumeState.NOT_PRESENT, "record_unreadable"): _RECORD_UNREADABLE,
+        (VolumeState.NOT_MOUNTED, "record_unreadable"): _RECORD_UNREADABLE,
         (VolumeState.NEEDS_KEY, "dialog_open"): "key dialog open",
         (VolumeState.NEEDS_KEY, "dialog_failed"): "key dialog could not be shown",
         (VolumeState.NEEDS_KEY, "key_permissions"): "key file permissions",
@@ -330,6 +338,7 @@ _MOUNT = "{cli} mount --volume {name}"
 _SET_KEY = "{cli} set-key {name}"
 _REPLUG = "replug the drive"
 _CHKDSK = "chkdsk /f on it in Windows"
+_JOURNAL = "journalctl -t steamos-mounter SM_VOLUME={name}"
 
 
 def _sentence(text: str) -> str:
@@ -340,7 +349,13 @@ def _sentence(text: str) -> str:
 NEXT_STEP_TEXTS: Final[Mapping[tuple[VolumeState, str | None], str]] = MappingProxyType(
     {
         (VolumeState.NOT_PRESENT, None): "Plug the drive in.",
+        (VolumeState.NOT_PRESENT, "record_unreadable"): (
+            f"Plug the drive in; {_JOURNAL} shows what was unmounted."
+        ),
         (VolumeState.NOT_MOUNTED, None): f"Run {_MOUNT}.",
+        (VolumeState.NOT_MOUNTED, "record_unreadable"): (
+            f"Run {_MOUNT}; {_JOURNAL} shows what was unmounted."
+        ),
         (VolumeState.LOCKED, None): (
             "Unlock it in Dolphin; it mounts by itself after that."
         ),
@@ -365,9 +380,7 @@ NEXT_STEP_TEXTS: Final[Mapping[tuple[VolumeState, str | None], str]] = MappingPr
         (VolumeState.MOUNTING, None): "Wait a few seconds and run list again.",
         (VolumeState.MOUNTED_RW, None): NO_NEXT_STEP,
         (VolumeState.MOUNTED_RW_DIRTY, None): f"Run {_CHKDSK}.",
-        (VolumeState.MOUNTED_RO, None): (
-            "See journalctl -t steamos-mounter SM_VOLUME={name}."
-        ),
+        (VolumeState.MOUNTED_RO, None): f"See {_JOURNAL}.",
         (VolumeState.MOUNTED_RO, "unsafe"): (
             f"Shut Windows down fully (no Fast Startup), then run {_CHKDSK}."
         ),

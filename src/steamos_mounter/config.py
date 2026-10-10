@@ -32,12 +32,13 @@ from typing import TYPE_CHECKING, Final, Literal
 from steamos_mounter import locks
 from steamos_mounter.atomicfile import check_owner_mode, write_atomic
 from steamos_mounter.errors import RefusedError, RegistryError, UsageError
-from steamos_mounter.model import Driver, InvalidEntry, Mode, Registry, Step, Volume
+from steamos_mounter.model import InvalidEntry, Registry, Step, Volume
 from steamos_mounter.naming import (
     REGISTRY_NAME_RE,
     PathKind,
     validate_fixed_path,
 )
+from steamos_mounter.ntfs import DRIVER_TOKENS, format_drivers, parse_drivers
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -66,14 +67,6 @@ UUID_FORMS: Final = (
         r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}"
     ),
 )
-READ_ONLY_SUFFIX: Final = ":ro"
-# The Design Doc's "drivers Spelling" table: six tokens, each one chain step.
-DRIVER_STEPS: Final = {
-    f"{driver}{READ_ONLY_SUFFIX if mode is Mode.RO else ''}": Step(driver, mode)
-    for driver in (Driver.NTFS3, Driver.NTFS3G, Driver.NTFS)
-    for mode in Mode
-}
-
 DUPLICATE_UUID: Final = "duplicate uuid"
 DUPLICATE_NAME: Final = "duplicate name"
 DUPLICATE_PATH: Final = "duplicate path"
@@ -254,7 +247,7 @@ def _check_drivers(value: object, _mount_base: str) -> str | None:
         return "drivers: must be a list of strings"
     if not value:
         return "drivers: must not be empty"
-    if any(token not in DRIVER_STEPS for token in value):
+    if any(token not in DRIVER_TOKENS for token in value):
         return "drivers: unknown token"
     if len(set(value)) != len(value):
         return "drivers: duplicate token"
@@ -324,7 +317,7 @@ def _volume(entry: Mapping[str, object]) -> Volume:
 def _steps(tokens: object) -> tuple[Step, ...] | None:
     if not isinstance(tokens, list):
         return None
-    return tuple(DRIVER_STEPS[token] for token in tokens)
+    return parse_drivers(tokens)
 
 
 # --- cross-entry rules ----------------------------------------------------------------
@@ -441,10 +434,6 @@ def _volume_name(volume: Volume) -> str:
     return volume.name
 
 
-def _step_token(step: Step) -> str:
-    return f"{step.driver}{READ_ONLY_SUFFIX if step.mode is Mode.RO else ''}"
-
-
 def _fields(volume: Volume) -> dict[str, object]:
     """``volume`` as its table's keys and values, in schema order."""
     fields: dict[str, object] = {
@@ -454,7 +443,7 @@ def _fields(volume: Volume) -> dict[str, object]:
         "fstype": volume.fstype,
     }
     if volume.drivers is not None:
-        fields["drivers"] = [_step_token(step) for step in volume.drivers]
+        fields["drivers"] = format_drivers(volume.drivers)
     fields["nosuid"] = volume.nosuid
     fields["nodev"] = volume.nodev
     return fields

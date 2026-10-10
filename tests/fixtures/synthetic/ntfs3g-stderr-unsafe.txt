@@ -1,0 +1,4 @@
+# synthetic: ntfs-3g stderr for a read-write request on an unsafe volume (hibernated, Fast Startup or abrupt unplug); fallback_readonly_msg text from upstream libntfs-3g/volume.c until a V-06 capture
+Falling back to read-only mount because the NTFS partition is in an
+unsafe state. Please resume and shutdown Windows fully (no hibernation
+or fast restarting.)

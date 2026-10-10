@@ -17,6 +17,10 @@ failed query) is ``NOT_SURE``, and one NOTICE line carries the property
 values (AC-076): a missed dialog or notification is better than one in the
 wrong place.
 
+A caller with a time budget passes ``deadline`` (a ``ctx.clock.monotonic()``
+time): each query then gets at most what is left of it, and once nothing is
+left no query runs and the verdict is ``NOT_SURE``.
+
 The display half (the user manager's ``DISPLAY``, the X listener in the
 session's scope, ``need_display=True``) is not built yet: asking for it raises
 ``NotImplementedError``. Notifications only need the logind half (DD-19).
@@ -107,20 +111,24 @@ def parse_props(text: str) -> dict[str, str]:
     return _Props(parse_show(text))
 
 
-def check(ctx: "Context", *, need_display: bool) -> SessionCheck:
+def check(
+    ctx: "Context", *, need_display: bool, deadline: float | None = None
+) -> SessionCheck:
     """The session verdict for the platform's session user and seat.
 
     ``need_display=True`` (the key dialog) raises ``NotImplementedError``
-    until the display half lands; no Phase 3 caller asks for it.
+    until the display half lands; no Phase 3 caller asks for it. With a
+    ``deadline`` no query runs past it (``QUERY_TIMEOUT`` at most each).
     """
     if need_display:
         raise NotImplementedError(DISPLAY_HALF_MISSING)
     user_name = ctx.platform.session_user().name
     allow_list = ctx.platform.allow_list
+    queries = _Queries(ctx, deadline)
 
-    user = _query(ctx, "show-user", user_name, ("Display",))
-    if isinstance(user, CommandResult):
-        return _failed(user, None)
+    user = queries.run("show-user", user_name, ("Display",))
+    if not isinstance(user, dict):
+        return _unanswered(user, None, "show-user")
     session_id = user["Display"]
     if not session_id:
         log.info("%s has no graphical session", user_name)
@@ -128,16 +136,16 @@ def check(ctx: "Context", *, need_display: bool) -> SessionCheck:
     if SESSION_ID.fullmatch(session_id) is None:
         return _not_sure(None, {"Display": session_id}, ("Display",))
 
-    seat = _query(ctx, "show-seat", allow_list.seat, ("ActiveSession",))
-    if isinstance(seat, CommandResult):
-        return _failed(seat, session_id)
+    seat = queries.run("show-seat", allow_list.seat, ("ActiveSession",))
+    if not isinstance(seat, dict):
+        return _unanswered(seat, session_id, "show-seat")
     if seat["ActiveSession"] != session_id:
         detail = {"Display": session_id, "ActiveSession": seat["ActiveSession"]}
         return _not_sure(session_id, detail, ("ActiveSession",))
 
-    props = _query(ctx, "show-session", session_id, SESSION_PROPERTIES)
-    if isinstance(props, CommandResult):
-        return _failed(props, session_id)
+    props = queries.run("show-session", session_id, SESSION_PROPERTIES)
+    if not isinstance(props, dict):
+        return _unanswered(props, session_id, "show-session")
     detail = {name: props[name] for name in SESSION_PROPERTIES}
     mismatched = _mismatches(detail, user_name, allow_list)
     if mismatched:
@@ -172,15 +180,28 @@ def _mismatches(
     )
 
 
-def _query(
-    ctx: "Context", verb: str, name: str, props: tuple[str, ...]
-) -> dict[str, str] | CommandResult:
-    """``loginctl <verb> <name> -p <props>`` parsed; the result when it failed."""
-    argv = (ctx.platform.tools.loginctl, verb, name, "-p", ",".join(props))
-    result = ctx.runner.run(Command(argv=argv, timeout=QUERY_TIMEOUT))
-    if result.returncode != 0:
-        return result
-    return parse_props(result.text())
+@dataclass(frozen=True, slots=True)
+class _Queries:
+    """``loginctl`` queries of one check, within its ``deadline`` (or none)."""
+
+    ctx: "Context"
+    deadline: float | None
+
+    def run(
+        self, verb: str, name: str, props: tuple[str, ...]
+    ) -> dict[str, str] | CommandResult | None:
+        """``loginctl <verb> <name> -p <props>`` parsed; the result when it
+        failed; None when the deadline left no time to ask."""
+        timeout = QUERY_TIMEOUT
+        if self.deadline is not None:
+            timeout = min(timeout, self.deadline - self.ctx.clock.monotonic())
+            if timeout <= 0:
+                return None
+        argv = (self.ctx.platform.tools.loginctl, verb, name, "-p", ",".join(props))
+        result = self.ctx.runner.run(Command(argv=argv, timeout=timeout))
+        if result.returncode != 0:
+            return result
+        return parse_props(result.text())
 
 
 def _verdict(
@@ -209,6 +230,16 @@ def _not_sure(
         values,
     )
     return _verdict(Verdict.NOT_SURE, session_id, detail)
+
+
+def _unanswered(
+    result: CommandResult | None, session_id: str | None, verb: str
+) -> SessionCheck:
+    """``NOT_SURE`` for a query that failed, or that the deadline left unasked."""
+    if result is not None:
+        return _failed(result, session_id)
+    log.log(NOTICE, "%s: no time left for loginctl %s", NOT_RECOGNIZED, verb)
+    return _verdict(Verdict.NOT_SURE, session_id, {})
 
 
 def _failed(result: CommandResult, session_id: str | None) -> SessionCheck:

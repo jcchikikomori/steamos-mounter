@@ -16,7 +16,7 @@ import pytest
 from steamos_mounter import state
 from steamos_mounter.errors import SecretHandlingError
 from steamos_mounter.model import InstanceKind, VolumeState
-from steamos_mounter.notify import Notice, notice_for, send
+from steamos_mounter.notify import Notice, notice_for, out_of_time, send
 from steamos_mounter.sensitive import SecretBytes
 from steamos_mounter.state import VolumeView
 from tests.helpers.fake_runner import Answer
@@ -487,6 +487,58 @@ def test_send_refuses_a_secret_in_the_text(ctx, fake_runner):
             send(ctx, leaky)
 
     assert fake_runner.calls == []
+
+
+# --- send: the time budget (a deadline on ctx.clock.monotonic()) ------------------
+
+
+def test_send_takes_at_most_what_is_left_of_the_deadline(ctx, fake_runner, fake_clock):
+    fake_runner.on(SYSTEMD_RUN, Answer())
+
+    sent = send(ctx, MEDIABOX_NOTICE, deadline=fake_clock.monotonic() + 6.5)
+
+    assert sent is True
+    assert [call.timeout for call in fake_runner.calls] == [6.5]
+
+
+def test_send_with_time_to_spare_keeps_its_own_15_s(ctx, fake_runner, fake_clock):
+    fake_runner.on(SYSTEMD_RUN, Answer())
+
+    sent = send(ctx, MEDIABOX_NOTICE, deadline=fake_clock.monotonic() + 60)
+
+    assert sent is True
+    assert [call.timeout for call in fake_runner.calls] == [15.0]
+
+
+@pytest.mark.parametrize("left", [0.0, -3.0], ids=["at", "past"])
+def test_send_out_of_time_is_skipped_with_one_warning(
+    ctx, fake_runner, fake_clock, caplog, left
+):
+    with caplog.at_level(logging.DEBUG, logger=LOGGER):
+        sent = send(ctx, MEDIABOX_NOTICE, deadline=fake_clock.monotonic() + left)
+
+    assert sent is False
+    assert fake_runner.calls == []
+    [warning] = caplog.records
+    assert warning.levelno == logging.WARNING
+    assert warning.sm_fields["SM_EVENT"] == "notify"
+    assert warning.getMessage() == (
+        "notification not sent: no time left before the unit's start timeout"
+    )
+
+
+def test_out_of_time_is_false_while_time_is_left(ctx, fake_clock, caplog):
+    with caplog.at_level(logging.DEBUG, logger=LOGGER):
+        late = out_of_time(ctx, fake_clock.monotonic() + 0.1)
+
+    assert late is False
+    assert caplog.records == []
+
+
+def test_out_of_time_without_a_deadline_is_never_late(ctx, fake_clock):
+    fake_clock.advance(10_000)
+
+    assert out_of_time(ctx, None) is False
 
 
 # --- flag conformance against the Deck's help captures --------------------------

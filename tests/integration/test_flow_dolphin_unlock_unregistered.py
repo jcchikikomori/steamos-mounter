@@ -21,13 +21,43 @@ Fixtures expected from tests/conftest.py: fake_runner, fake_platform, host_tree,
 fake_kmsg, fake_clock, ctx. Skipped until steamos_mounter.reconcile exists.
 """
 
+import logging
 from pathlib import Path
 
 import pytest
+from tests.helpers.fake_runner import Answer
+from tests.helpers.flows import (
+    ACTIVE,
+    CRYPTSETUP,
+    DMSETUP,
+    LOGINCTL,
+    MOUNT,
+    NTFS3G,
+    PROBE,
+    SYSTEMCTL,
+    SYSTEMD_RUN,
+    TABLE_ARGV,
+    known_os_set,
+    make_mount_base,
+    make_var_run,
+    read_record,
+    readback_argv,
+    runtime_dirs,
+    script_lsblk,
+    sm_fields,
+    write_registry,
+)
+from tests.helpers.host_tree import SysfsDevice
+
+from steamos_mounter import blockdev, config, mounts
+from steamos_mounter.journal import NOTICE
+from steamos_mounter.model import InstanceKind, Trigger, VolumeState
+from steamos_mounter.routing import Action
 
 reconcile = pytest.importorskip("steamos_mounter.reconcile")
 systemd = pytest.importorskip("steamos_mounter.systemd")
 escape = pytest.importorskip("steamos_mounter.escape")
+state = pytest.importorskip("steamos_mounter.state")
 
 OBAMA_PATH = "/run/media/deck/OBAMA"
 DM1_SYSPATH = "/sys/devices/virtual/block/dm-1"
@@ -38,6 +68,37 @@ SDC1_SYSPATH = (
 SDC1_RECORD = "run/steamos-mounter/records/auto/sdc1-8_33.json"
 DM1_RECORD = "run/steamos-mounter/records/auto/dm-1-252_1.json"
 NTFS_RW_OPTIONS = "nosuid,nodev,uid=1000,gid=1000,umask=0022,windows_names"
+CLI = "sudo /opt/steamos-mounter/bin/steamos-mounter"
+# A label-derived udisks name, the same shape as DM_NAME in udev-dm-0.txt.
+UDISKS_NAME = "OBAMA_BACKUP_1_2_2025"
+
+
+def given_obama_unlocked_in_dolphin(ctx, tmp_path: Path, host_tree) -> None:
+    """Empty registry, OS set known, base present, sysfs for sdc, sdc1 and dm-1."""
+    runtime_dirs(ctx)
+    write_registry(tmp_path, None)
+    known_os_set(tmp_path)
+    make_mount_base(tmp_path)
+    make_var_run(tmp_path)
+    host_tree.add_block(SysfsDevice(kname="sdc", devnum="8:32"))
+    host_tree.add_block(
+        SysfsDevice(
+            kname="sdc1",
+            devnum="8:33",
+            parent="sdc",
+            syspath=SDC1_SYSPATH,
+            holders=("dm-1",),
+        )
+    )
+    host_tree.add_block(
+        SysfsDevice(
+            kname="dm-1",
+            devnum="252:1",
+            syspath=DM1_SYSPATH,
+            slaves=("sdc1",),
+            dm_name=UDISKS_NAME,
+        )
+    )
 
 
 @pytest.fixture
@@ -66,7 +127,7 @@ def partition_auto_unit() -> str:
 # @complexity: high
 # @real-dependency: tmp_path sysfs (slaves/, dm/name), records, flock
 def test_dolphin_unlock_delegates_then_mounts_inner_under_auto_path(
-    tmp_path: Path,
+    tmp_path: Path, ctx, host_tree, fake_runner, partition_auto_unit
 ) -> None:
     """Design Doc "Dolphin-unlock Path", unregistered branch.
 
@@ -106,7 +167,55 @@ def test_dolphin_unlock_delegates_then_mounts_inner_under_auto_path(
         "sdc1", source.devnum "8:33" (the teardown key, ADR-0002 D4.5)
       - no key unit start (unregistered: never a prompt, AC-025 spirit)
     """
-    pytest.skip("skeleton: implement in Phase 3 (mount engine)")
+    given_obama_unlocked_in_dolphin(ctx, tmp_path, host_tree)
+    script_lsblk(fake_runner, "lsblk-tree-dolphin-unregistered.json")
+    fake_runner.on((SYSTEMCTL, "show"), Answer(stdout=ACTIVE.encode()))
+    fake_runner.on((SYSTEMCTL, "reload", "--no-block"), Answer())
+    fake_runner.on(TABLE_ARGV, "findmnt-real-list.json")
+    fake_runner.on(PROBE, Answer())
+    fake_runner.on(MOUNT, Answer())
+    fake_runner.on(
+        readback_argv(OBAMA_PATH),
+        Answer.from_fixture("findmnt-obama-ntfs3-rw.json", returncode=0),
+    )
+
+    first = reconcile.run(ctx, InstanceKind.AUTO, DM1_SYSPATH, Trigger.START)
+    second = reconcile.run(ctx, InstanceKind.AUTO, SDC1_SYSPATH, Trigger.RELOAD)
+
+    assert first.route.action is Action.DELEGATE
+    assert first.route.delegate_unit == partition_auto_unit
+    assert first.reason == "reloaded"  # what systemd.request_reconcile returned
+    systemctl = [argv[1:3] for argv in fake_runner.argvs if argv[0] == SYSTEMCTL]
+    assert systemctl == [
+        ("show", "--property=LoadState,ActiveState"),
+        ("reload", "--no-block"),
+    ]
+    assert not (tmp_path / DM1_RECORD).exists()  # delegating instances own nothing
+    assert second.route.action is Action.AUTO_MOUNT_INNER
+    assert second.state is VolumeState.MOUNTED_RW
+    record = read_record(tmp_path, SDC1_RECORD)
+    assert (record["mount"]["device"], record["mount"]["target"]) == (
+        "/dev/dm-1",
+        OBAMA_PATH,
+    )
+    assert record["name"] == "OBAMA"  # the inner label, never the dm name
+    assert [argv for argv in fake_runner.argvs if argv[0] == MOUNT] == [
+        (MOUNT, "-i", "-t", "ntfs3", "-o", NTFS_RW_OPTIONS, "/dev/dm-1", OBAMA_PATH)
+    ]
+    tools = {argv[0] for argv in fake_runner.argvs}
+    assert {CRYPTSETUP, DMSETUP}.isdisjoint(tools)  # Dolphin did the unlock
+    assert record["mapping"] == {
+        "name": UDISKS_NAME,
+        "kname": "dm-1",
+        "devnum": "252:1",
+        "opened_by": "other",
+        "key_unit_invocation_id": None,
+        "save_pending": False,
+    }
+    assert (record["source"]["kname"], record["source"]["devnum"]) == ("sdc1", "8:33")
+    assert not any(
+        "steamos-mounter-key@" in " ".join(argv) for argv in fake_runner.argvs
+    )
 
 
 # AC-026 second sentence and AC-034: "Given a partition that is already mounted
@@ -121,7 +230,7 @@ def test_dolphin_unlock_delegates_then_mounts_inner_under_auto_path(
 # @complexity: medium
 # @real-dependency: tmp_path records, flock
 def test_dolphin_unlock_mounted_first_by_udisks_is_left_alone(
-    tmp_path: Path,
+    tmp_path: Path, ctx, host_tree, fake_runner, caplog
 ) -> None:
     """Held check wins over the chain when udisks got there first.
 
@@ -129,7 +238,9 @@ def test_dolphin_unlock_mounted_first_by_udisks_is_left_alone(
       - the same tree and sysfs as the test above
       - FakeRunner: findmnt ... --list --real ->
         fixtures/synthetic/findmnt-list-dm1-at-udisks-path.json, which lists
-        /dev/dm-1 (MAJ:MIN 252:1) mounted at /run/media/deck/OBAMA by udisks
+        /dev/dm-1 (MAJ:MIN 252:1) mounted at /run/media/deck/OBAMA by udisks;
+        scripted twice, once for reconcile and once for compute_views, so a
+        second table read inside reconcile fails the test
     When
       - reconcile.run(ctx, InstanceKind.AUTO, SDC1_SYSPATH, Trigger.RELOAD)
     Then (pass criteria)
@@ -141,5 +252,47 @@ def test_dolphin_unlock_mounted_first_by_udisks_is_left_alone(
       - caplog holds one NOTICE with SM_EVENT=reconcile, SM_STATE=
         MountedElsewhere, SM_REASON naming /run/media/deck/OBAMA (AC-034)
       - no notification is sent (MountedElsewhere is not in the notify list)
+      - state.compute_views(...) shows the auto entry as mounted elsewhere with
+        path /run/media/deck/OBAMA, i.e. "mounted elsewhere (at
+        /run/media/deck/OBAMA)" once the renderer adds "(at PATH)"
     """
-    pytest.skip("skeleton: implement in Phase 3 (mount engine)")
+    caplog.set_level(logging.DEBUG)
+    given_obama_unlocked_in_dolphin(ctx, tmp_path, host_tree)
+    script_lsblk(fake_runner, "lsblk-tree-dolphin-unregistered.json")
+    udisks_table = Answer.from_fixture(
+        "findmnt-list-dm1-at-udisks-path.json", returncode=0
+    )
+    # One table read for reconcile's held check, one for compute_views below.
+    fake_runner.on(TABLE_ARGV, udisks_table, udisks_table)
+
+    outcome = reconcile.run(ctx, InstanceKind.AUTO, SDC1_SYSPATH, Trigger.RELOAD)
+
+    assert outcome.state is VolumeState.MOUNTED_ELSEWHERE
+    assert OBAMA_PATH in outcome.reason
+    tools = {argv[0] for argv in fake_runner.argvs}
+    assert {PROBE, MOUNT, NTFS3G}.isdisjoint(tools)
+    record = read_record(tmp_path, SDC1_RECORD)
+    assert record["state"] == "MountedElsewhere"
+    assert record["mount"] is None  # nothing mounted by this tool, no created_dir
+    # state.next_step's MountedElsewhere step, in the auto form (--device).
+    assert record["next_step"] == (
+        f"Unmount it there, then run {CLI} mount --device /dev/sdc1 to use the"
+        " fixed path."
+    )
+    [notice] = [
+        r
+        for r in caplog.records
+        if r.levelno == NOTICE
+        and sm_fields(r).get("SM_EVENT") == "reconcile"
+        and sm_fields(r).get("SM_STATE") == "MountedElsewhere"
+    ]
+    assert OBAMA_PATH in sm_fields(notice)["SM_REASON"]
+    assert {LOGINCTL, SYSTEMD_RUN}.isdisjoint(tools)  # not in the notify list
+    views = state.compute_views(
+        ctx, config.load(ctx), blockdev.read_tree(ctx), mounts.table(ctx)
+    )
+    [obama] = [view for view in views if view.kind is InstanceKind.AUTO]
+    assert (obama.state, obama.path) == (VolumeState.MOUNTED_ELSEWHERE, OBAMA_PATH)
+    # state.words gives the state; the renderer appends "(at PATH)" (state._WORDS).
+    rendered = f"{state.words(obama.state, obama.reason)} (at {obama.path})"
+    assert rendered == "mounted elsewhere (at /run/media/deck/OBAMA)"

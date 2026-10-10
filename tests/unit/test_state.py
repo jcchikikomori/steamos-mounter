@@ -650,6 +650,16 @@ def test_every_state_has_words():
         (VolumeState.MOUNTED_RO, "unsafe", f"mounted read-only: {UNSAFE_PHRASE}"),
         (VolumeState.MOUNT_FAILED, "device_busy", "mount failed: device busy"),
         (VolumeState.MOUNT_FAILED, "some tool message", "mount failed"),
+        (
+            VolumeState.NOT_PRESENT,
+            "record_unreadable",
+            "not present: its state record was unreadable",
+        ),
+        (
+            VolumeState.NOT_MOUNTED,
+            "record_unreadable",
+            "present, not mounted yet: its state record was unreadable",
+        ),
     ],
 )
 def test_words_with_a_reason(volume_state, reason, expected):
@@ -658,7 +668,19 @@ def test_words_with_a_reason(volume_state, reason, expected):
 
 NEXT_STEPS = [
     (VolumeState.NOT_PRESENT, None, "Plug the drive in."),
+    (
+        VolumeState.NOT_PRESENT,
+        "record_unreadable",
+        "Plug the drive in; journalctl -t steamos-mounter SM_VOLUME=DRIVE shows"
+        " what was unmounted.",
+    ),
     (VolumeState.NOT_MOUNTED, None, f"Run {CLI} mount --volume DRIVE."),
+    (
+        VolumeState.NOT_MOUNTED,
+        "record_unreadable",
+        f"Run {CLI} mount --volume DRIVE; journalctl -t steamos-mounter"
+        " SM_VOLUME=DRIVE shows what was unmounted.",
+    ),
     (
         VolumeState.LOCKED,
         None,

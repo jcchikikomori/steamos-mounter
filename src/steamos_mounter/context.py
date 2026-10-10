@@ -65,7 +65,7 @@ def build_context(*, component: str, release_root: str | None = None) -> Context
         platform=current_platform(paths),
         paths=paths,
         clock=SystemClock(),
-        # Looked up at call time: DevKmsg arrives with the NTFS chain (task 20).
+        # Opens /dev/kmsg on its first mark() only: deck commands get one too.
         kmsg=kmsg.DevKmsg(),
         euid=os.geteuid(),
         invocation_id=os.environ.get(INVOCATION_ID_VARIABLE) or None,
