@@ -349,7 +349,7 @@ class FakePathFacts:
     ) -> None:
         self.entries = {
             "/": PathKind.NON_EMPTY_DIR,
-            "/home/deck": PathKind.NON_EMPTY_DIR,
+            "/run": PathKind.NON_EMPTY_DIR,
             "/run/media": PathKind.NON_EMPTY_DIR,
             BASE: PathKind.NON_EMPTY_DIR,
             **(entries or {}),
@@ -383,20 +383,14 @@ def validate(
     [
         f"{BASE}/GAMES",
         f"{BASE}/{PERSONAL_AUTO}",
-        "/home/deck/Drives",
-        "/home/deck/my.drive_2+x-y",
+        f"{BASE}/my.drive_2+x-y",
         f"{BASE}/" + "a" * (255 - len(BASE) - 1),  # exactly 255 bytes
-        "/usrx",  # a sibling of /usr, not under it
-        "/runner",  # a sibling of /run
-        "/run/media/other",
         f"{BASE}/-x",
         f"{BASE}/...",
     ],
 )
 def test_fixed_path_accepted(path: str):
-    fs = FakePathFacts({"/home/deck/Drives": PathKind.EMPTY_DIR})
-
-    assert validate(path, fs=fs) is None
+    assert validate(path) is None
 
 
 ABSOLUTE = "path must be absolute"
@@ -410,6 +404,7 @@ PROTECTED = "path is a protected directory"
 SYSTEM = "path is at or under a system directory"
 RUN = "path is under /run but not under /run/media"
 BASE_OR_PARENT = "path is the mount base or one of its parents"
+NOT_BASE_CHILD = "path must be directly under the mount base"
 SYSTEM_DIRECTORIES = (
     "/usr", "/etc", "/var", "/opt", "/boot", "/efi", "/esp", "/proc", "/sys", "/dev",
     "/tmp", "/root", "/srv", "/nix", "/bin", "/sbin", "/lib", "/lib64",
@@ -443,6 +438,17 @@ LEXICAL_REFUSALS = [
     ("rule4-run-mediax", "/run/mediax", RUN),
     ("rule4-run-media", "/run/media", BASE_OR_PARENT),
     ("rule4-mount-base", BASE, BASE_OR_PARENT),
+    # Rules 2 to 4 run before rule 9 and keep their reasons (DD-34).
+    ("rule3-var-run-spelling", "/var/run/media/deck/X", SYSTEM),
+    ("rule9-mnt", "/mnt/X", NOT_BASE_CHILD),
+    ("rule9-home-deck-drives", "/home/deck/Drives/X", NOT_BASE_CHILD),
+    ("rule9-home-deck-child", "/home/deck/my.drive_2+x-y", NOT_BASE_CHILD),
+    ("rule9-under-a-mounted-stick", f"{BASE}/STICK/sub/X", NOT_BASE_CHILD),
+    ("rule9-grandchild", f"{BASE}/GAMES/sub", NOT_BASE_CHILD),
+    ("rule9-sibling-of-the-base", "/run/media/other", NOT_BASE_CHILD),
+    ("rule9-sibling-of-usr", "/usrx", NOT_BASE_CHILD),
+    ("rule9-sibling-of-run", "/runner", NOT_BASE_CHILD),
+    ("rule9-child-of-root", "/X", NOT_BASE_CHILD),
 ]
 GAMES = f"{BASE}/GAMES"
 OVERLAP = "path overlaps another registered path or mount"
@@ -454,12 +460,11 @@ DISK_AND_REGISTRY_REFUSALS = [
     ("rule5-not-a-dir", GAMES, (), {GAMES: PathKind.OTHER},
      "path exists and is not a directory"),
     ("rule6-equal", GAMES, (f"{BASE}/OTHER", GAMES), {}, OVERLAP),
-    ("rule6-inside", f"{GAMES}/sub", (GAMES,), {GAMES: PathKind.EMPTY_DIR}, OVERLAP),
-    ("rule6-containing", "/home/deck/Drives", ("/home/deck/Drives/GAMES",), {},
-     OVERLAP),
-    ("rule7-parent-missing", "/home/deck/Drives/GAMES", (), {}, PARENT_MISSING),
-    ("rule7-parent-not-a-dir", "/home/deck/Drives/GAMES", (),
-     {"/home/deck/Drives": PathKind.OTHER}, PARENT_MISSING),
+    # A registered path cannot nest in another since rule 9; a current mount can.
+    ("rule6-inside", GAMES, (BASE,), {}, OVERLAP),
+    ("rule6-containing", GAMES, (f"{GAMES}/sub",), {}, OVERLAP),
+    ("rule7-parent-missing", GAMES, (), {BASE: PathKind.MISSING}, PARENT_MISSING),
+    ("rule7-parent-not-a-dir", GAMES, (), {BASE: PathKind.OTHER}, PARENT_MISSING),
 ]  # fmt: skip
 FIXED_PATH_REFUSALS = [
     *((case, path, (), {}, reason) for case, path, reason in LEXICAL_REFUSALS),
@@ -513,9 +518,22 @@ def test_fixed_path_mount_base_follows_the_platform(
 
 
 def test_fixed_path_deck_base_is_not_special_on_another_platform():
+    """Rule 4 follows the platform: the Deck base is refused by rule 9 there."""
     fs = FakePathFacts({BASE: PathKind.EMPTY_DIR})
 
-    assert validate(BASE, mount_base="/mnt/drives/deck", fs=fs) is None
+    with pytest.raises(RefusedError) as raised:
+        validate(BASE, mount_base="/mnt/drives/deck", fs=fs)
+
+    assert raised.value.user_message == NOT_BASE_CHILD
+
+
+def test_fixed_path_rule9_follows_the_platform():
+    other_base = "/mnt/drives/deck"
+    fs = FakePathFacts({other_base: PathKind.EMPTY_DIR})
+
+    assert validate(f"{other_base}/GAMES", mount_base=other_base, fs=fs) is None
+    with pytest.raises(RefusedError, match=NOT_BASE_CHILD):
+        validate(f"{BASE}/GAMES", mount_base=other_base, fs=fs)
 
 
 def test_fixed_path_rule5_empty_directory_is_accepted():
@@ -536,30 +554,39 @@ def test_fixed_path_rule6_accepts_a_one_shot_iterable():
 
 
 def test_fixed_path_rule7_empty_parent_is_accepted():
-    fs = FakePathFacts({"/home/deck/Drives": PathKind.EMPTY_DIR})
+    fs = FakePathFacts({BASE: PathKind.EMPTY_DIR})
 
-    assert validate("/home/deck/Drives/GAMES", fs=fs) is None
+    assert validate(f"{BASE}/GAMES", fs=fs) is None
+
+
+def test_fixed_path_equal_to_a_current_auto_mount_is_refused():
+    """Auto mounts and registered paths share ``<base>/<NAME>``: rule 6 keeps
+    ``add`` off a name an unregistered stick is mounted at right now."""
+    auto_mount = unique_auto_path(BASE, sanitize_label("GAMES"), set().__contains__)
+
+    with pytest.raises(RefusedError) as raised:
+        validate(f"{BASE}/GAMES", other_paths=[auto_mount])
+
+    assert raised.value.user_message == OVERLAP
 
 
 # --- rule 8: trusted parent directories (owner decision 2026-10-10, option A) ----
 
 UNTRUSTED_PARENT = "a parent directory is a symlink or writable by a non-root user"
-DRIVES = "/home/deck/Drives"
 
 
 @pytest.mark.parametrize(
-    ("path", "untrusted"),
+    "untrusted",
     [
-        pytest.param(f"{DRIVES}/GAMES", "/home/deck", id="deck-owned-home"),
-        pytest.param(f"{DRIVES}/GAMES", DRIVES, id="untrusted-parent"),
-        pytest.param(f"{DRIVES}/GAMES", "/home", id="untrusted-grandparent"),
-        pytest.param(f"{DRIVES}/GAMES", "/", id="untrusted-root"),
-        pytest.param(f"{BASE}/GAMES", BASE, id="untrusted-mount-base"),
-        pytest.param(f"{BASE}/GAMES", "/run", id="untrusted-run"),
+        pytest.param(BASE, id="untrusted-mount-base"),
+        pytest.param("/run/media", id="untrusted-grandparent"),
+        pytest.param("/run", id="untrusted-run"),
+        pytest.param("/", id="untrusted-root"),
     ],
 )
-def test_fixed_path_rule8_refuses_an_untrusted_parent(path: str, untrusted: str):
-    fs = FakePathFacts({DRIVES: PathKind.EMPTY_DIR}, untrusted=[untrusted])
+def test_fixed_path_rule8_refuses_an_untrusted_parent(untrusted: str):
+    path = f"{BASE}/GAMES"
+    fs = FakePathFacts(untrusted=[untrusted])
 
     with pytest.raises(RefusedError) as raised:
         validate(path, fs=fs)
@@ -570,17 +597,37 @@ def test_fixed_path_rule8_refuses_an_untrusted_parent(path: str, untrusted: str)
 
 
 def test_fixed_path_rule8_checks_every_parent_from_the_root():
-    fs = FakePathFacts({DRIVES: PathKind.EMPTY_DIR})
+    fs = FakePathFacts()
 
-    validate(f"{DRIVES}/GAMES", fs=fs)
+    validate(f"{BASE}/GAMES", fs=fs)
 
-    assert [path for path in fs.asked if path != f"{DRIVES}/GAMES"] == [
-        DRIVES,  # rule 7
+    assert [path for path in fs.asked if path != f"{BASE}/GAMES"] == [
+        BASE,  # rule 7
         "/",
-        "/home",
-        "/home/deck",
-        DRIVES,
+        "/run",
+        "/run/media",
+        BASE,
     ]
+
+
+def test_fixed_path_rule9_wins_over_rule8_under_a_deck_owned_home():
+    """``/home/deck`` is deck-owned, but rule 9 refuses before any disk look."""
+    fs = FakePathFacts(
+        {"/home/deck/Drives": PathKind.EMPTY_DIR}, untrusted=["/home/deck"]
+    )
+
+    with pytest.raises(RefusedError) as raised:
+        validate("/home/deck/Drives/GAMES", fs=fs)
+
+    assert raised.value.user_message == NOT_BASE_CHILD
+    assert raised.value.detail == (
+        f"fixed path '/home/deck/Drives/GAMES' refused: {NOT_BASE_CHILD}"
+    )
+    assert fs.asked == []
+
+
+def test_rule9_reason_is_public():
+    assert naming.NOT_BASE_CHILD == NOT_BASE_CHILD
 
 
 def test_fixed_path_rule8_never_asks_about_the_leaf():
@@ -592,10 +639,10 @@ def test_fixed_path_rule8_never_asks_about_the_leaf():
 
 
 def test_fixed_path_rule7_wins_over_rule8_for_a_missing_parent():
-    fs = FakePathFacts(untrusted=[DRIVES])
+    fs = FakePathFacts({BASE: PathKind.MISSING}, untrusted=[BASE])
 
     with pytest.raises(RefusedError, match=PARENT_MISSING):
-        validate(f"{DRIVES}/GAMES", fs=fs)
+        validate(f"{BASE}/GAMES", fs=fs)
 
 
 @pytest.mark.parametrize(

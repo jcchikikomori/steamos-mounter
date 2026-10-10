@@ -1134,6 +1134,36 @@ def test_auto_name_skips_a_mount_point_and_a_registered_path(
     assert argvs_of(fake_runner, MOUNT)[0][-1] == "/run/media/deck/GAMES-3"
 
 
+def test_auto_name_skips_a_registered_path_equal_to_its_own_name(
+    ctx, host_tree, tmp_path, fake_runner
+):
+    """DD-34: auto names and registered paths share ``<base>/<NAME>``; an
+    unregistered stick labelled like a registered path gets ``-2``."""
+    exfat_world(ctx, host_tree, tmp_path, fake_runner)
+    write_registry(
+        tmp_path,
+        builders.registry_text(
+            [builders.RegistryVolume("OTHER", "AAAA-BBBB", GAMES_PATH, "vfat")]
+        ),
+    )
+    fake_runner.on(TABLE_ARGV, REAL_TABLE)
+    fake_runner.on(MOUNT, Answer())
+
+    def games_2(document):
+        document["filesystems"][0]["target"] = "/run/media/deck/GAMES-2"
+
+    fake_runner.on(
+        readback_argv("/run/media/deck/GAMES-2"),
+        edited_json("findmnt-games-exfat-rw.json", games_2),
+    )
+
+    outcome = reconcile.run(ctx, InstanceKind.AUTO, SDC1_SYSPATH, Trigger.START)
+
+    assert outcome.state is VolumeState.MOUNTED_RW
+    assert argvs_of(fake_runner, MOUNT)[0][-1] == "/run/media/deck/GAMES-2"
+    assert not (tmp_path / "run/media/deck/GAMES").exists()
+
+
 def test_refused_fixed_path_records_mount_failed(ctx, deck, fake_runner):
     (deck / "run/media/deck/MEDIABOX/somebody").mkdir(parents=True)
     script_lsblk(fake_runner, "lsblk-columns-tree.json")

@@ -5,8 +5,8 @@ generated registries are valid by construction: names from the registry name
 rule, UUIDs in all three schema forms, every filesystem type, ``drivers``
 lists only where the schema allows them, both values of ``nosuid`` and
 ``nodev``, and up to 60 volumes (NFR-25 has no count limit). Names and UUIDs
-are unique case-insensitively, and each path is a child of one of a few
-unrelated bases named after its volume, so no two paths nest.
+are unique case-insensitively, and each path is the mount base child named
+after its volume (rule 9, DD-34), so no two paths are equal or nest.
 
 Runs are reproducible: a fixed seed, ``derandomize=True`` and no example
 database, so CI and a laptop see the same examples.
@@ -21,7 +21,6 @@ from steamos_mounter.naming import REGISTRY_NAME_RE
 
 MOUNT_BASE = "/run/media/deck"
 SEED = 20261009
-PATH_BASES = ("/run/media/deck", "/mnt", "/media", "/home/deck/Drives")
 DRIVERS_FSTYPES = ("ntfs", "BitLocker")
 OTHER_FSTYPES = ("exfat", "vfat", "btrfs")
 NTFS_STEPS = tuple(
@@ -60,7 +59,7 @@ def volumes(draw: st.DrawFn) -> Volume:
     return Volume(
         name=name,
         uuid=draw(uuids),
-        path=f"{draw(st.sampled_from(PATH_BASES))}/{name}",
+        path=f"{MOUNT_BASE}/{name}",
         fstype=fstype,
         drivers=steps,
         nosuid=draw(st.booleans()),
@@ -89,6 +88,14 @@ registries = st.lists(
 @given(registries)
 def test_parse_of_emit_is_identity(registry):
     assert parse(emit(registry), mount_base=MOUNT_BASE) == registry
+
+
+@seed(SEED)
+@PROPERTY_SETTINGS
+@given(registries)
+def test_parse_without_a_mount_base_is_identity(registry):
+    """``parse(text)`` without the platform's base keeps every base child."""
+    assert parse(emit(registry)) == registry
 
 
 @seed(SEED)

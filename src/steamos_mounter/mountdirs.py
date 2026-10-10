@@ -6,6 +6,9 @@ Split out of ``mounter`` to keep it under 500 lines; ``mounter`` re-exports
 - The mount base is created only when missing, in the layout udisks makes on
   the Deck: ``/run/media`` root 0755, the base root 0750 plus
   ``setfacl -m u:<uid>:r-x``. A present base is never changed.
+- Every mount target, auto or registered, is a direct child of the mount
+  base (fixed-path rule 9); any other target is refused before the disk is
+  looked at, so no mount point can sit between the base and the leaf.
 - The tool creates only the leaf directory (root 0755), never a parent, and
   checks the target again right before every mount, fixed-path rule 8
   included: every directory above the target is a real directory owned by
@@ -23,10 +26,11 @@ from typing import TYPE_CHECKING, Final
 from steamos_mounter.atomicfile import check_owner_mode
 from steamos_mounter.errors import MounterError, RefusedError, ToolError
 from steamos_mounter.naming import (
+    NOT_BASE_CHILD,
     UNTRUSTED_PARENT,
     PathKind,
     has_trusted_parents,
-    validate_fixed_path,
+    is_base_child,
 )
 from steamos_mounter.platforms.base import HostPaths
 from steamos_mounter.runner import Command
@@ -130,19 +134,17 @@ class HostPathFacts:
 def prepare_target(ctx: "Context", target: str) -> bool:
     """Check ``target`` again right before mounting; create only the leaf.
 
-    A direct child of the mount base is an auto or registered name (auto
-    names keep printable Unicode, which the fixed-path character rule
-    refuses); any other path gets every fixed-path rule. Either way it must be
-    missing or an empty directory under trusted parent directories (rules 5,
-    7 and 8). Returns True when this call created the leaf. Raises
+    ``target`` must be a direct child of the mount base (rule 9), an auto or
+    a registered name; auto names keep printable Unicode, which the
+    fixed-path character rule refuses, so rule 1 is not applied whole here.
+    It must be missing or an empty directory under trusted parent directories
+    (rules 5, 7 and 8). Returns True when this call created the leaf. Raises
     ``RefusedError`` or ``MounterError``.
     """
-    base = ctx.platform.mount_base
+    if not is_base_child(target, ctx.platform.mount_base):
+        raise _refuse(target, NOT_BASE_CHILD)
     facts = HostPathFacts(ctx.paths, trusted_uid=ctx.platform.trusted_uid)
-    if posixpath.dirname(target) == base:
-        _check_base_child(target, facts)
-    else:
-        validate_fixed_path(target, mount_base=base, other_paths=(), fs=facts)
+    _check_base_child(target, facts)
     if facts.kind(target) is PathKind.EMPTY_DIR:
         return False
     _make_leaf(ctx.paths, target)
@@ -168,7 +170,11 @@ def _check_base_child(target: str, facts: HostPathFacts) -> None:
     elif not has_trusted_parents(target, facts):
         reason = UNTRUSTED_PARENT
     if reason is not None:
-        raise RefusedError(reason, detail=f"mount target {target!r} refused: {reason}")
+        raise _refuse(target, reason)
+
+
+def _refuse(target: str, reason: str) -> RefusedError:
+    return RefusedError(reason, detail=f"mount target {target!r} refused: {reason}")
 
 
 def _make_leaf(paths: HostPaths, target: str) -> None:

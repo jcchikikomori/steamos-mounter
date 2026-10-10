@@ -10,10 +10,11 @@ Two levels of failure, kept apart on purpose:
   or symlink check fails, the text is not UTF-8 or TOML, a top-level key is
   unknown, or ``schema_version`` is not 1. Nothing mounts, auto-mounts
   included, because the auto path cannot know which UUIDs are registered.
-- **Invalid entries** (``Registry.invalid``): one entry breaks a rule, or two
-  entries clash (duplicate UUID, name or path, or nested paths). Those
-  volumes do not mount, their valid UUIDs still block auto-mounting, and
-  every other entry works.
+- **Invalid entries** (``Registry.invalid``): one entry breaks a rule (a path
+  that is not a direct child of the mount base included, fixed-path rule 9),
+  or two entries clash (duplicate UUID, name or path). Those volumes do not
+  mount, their valid UUIDs still block auto-mounting, and every other entry
+  works. Two valid paths cannot nest: both are children of the same base.
 
 An absent ``config.toml`` in a good directory is the empty registry: the
 installer never creates it, the first ``add`` does (I001). ``save`` only
@@ -70,10 +71,10 @@ UUID_FORMS: Final = (
 DUPLICATE_UUID: Final = "duplicate uuid"
 DUPLICATE_NAME: Final = "duplicate name"
 DUPLICATE_PATH: Final = "duplicate path"
-NESTED_PATH: Final = "path nested with another entry's path"
-# Without a platform at hand only the fixed /run/media rule applies; naming
-# refuses /run/media and its parents anyway, so this adds no rule of its own.
-NO_MOUNT_BASE: Final = "/run/media"
+# The SteamOS platform's mount base, for checks without a platform at hand
+# (``parse`` without ``mount_base``, ``with_volume``). Rule 9 needs a real
+# base: every registered path is a direct child of it.
+DEFAULT_MOUNT_BASE: Final = "/run/media/deck"
 # A TOML control character: U+0000 to U+001F and U+007F.
 _TOML_CONTROL: Final = re.compile(r"[\x00-\x1f\x7f]")
 _TOML_ESCAPES: Final = {"\\": "\\\\", '"': '\\"'}
@@ -112,13 +113,13 @@ def load(ctx: "Context") -> Registry:
 def parse(text: str, *, mount_base: str | None = None) -> Registry:
     """Validate registry ``text``; ``RegistryError`` when it is unusable.
 
-    ``mount_base`` is the platform's: a path equal to it, or one of its
-    parents, is invalid. ``load`` always passes it. Disk facts of the fixed
-    path rules (an existing non-empty directory, a missing parent) are not
-    checked here; ``add`` and every mount check them.
+    ``mount_base`` is the platform's (default ``DEFAULT_MOUNT_BASE``): a path
+    that is not a direct child of it is invalid. ``load`` always passes it.
+    Disk facts of the fixed path rules (an existing non-empty directory, a
+    missing parent) are not checked here; ``add`` and every mount check them.
     """
     entries = _entries(_toml(text))
-    base = mount_base or NO_MOUNT_BASE
+    base = mount_base or DEFAULT_MOUNT_BASE
     candidates: list[tuple[int, Volume]] = []
     invalid: list[InvalidEntry] = []
     for index, entry in enumerate(entries):
@@ -226,7 +227,7 @@ class _AssumeFree:
 
 
 def _check_path(value: object, mount_base: str) -> str | None:
-    """The static part of the fixed-path rules (syntax and location)."""
+    """The static part of the fixed-path rules (1 to 4 and 9)."""
     if not isinstance(value, str):
         return "path: must be a string"
     try:
@@ -327,10 +328,6 @@ def _steps(tokens: object) -> tuple[Step, ...] | None:
 # --- cross-entry rules ----------------------------------------------------------------
 
 
-def _inside(path: str, other: str) -> bool:
-    return path.startswith(other.rstrip("/") + "/")
-
-
 def _clash(first: Volume, second: Volume) -> str | None:
     """Why two volumes cannot both be registered, or ``None``."""
     if first.uuid.lower() == second.uuid.lower():
@@ -339,8 +336,6 @@ def _clash(first: Volume, second: Volume) -> str | None:
         return DUPLICATE_NAME
     if first.path == second.path:
         return DUPLICATE_PATH
-    if _inside(first.path, second.path) or _inside(second.path, first.path):
-        return NESTED_PATH
     return None
 
 
@@ -361,11 +356,12 @@ def _clashes(candidates: Iterable[tuple[int, Volume]]) -> dict[int, str]:
 def with_volume(registry: Registry, volume: Volume) -> Registry:
     """``registry`` plus ``volume``, sorted by name.
 
-    Raises ``RefusedError`` when ``volume`` breaks a rule a read would apply,
-    or clashes with a registered volume (duplicate UUID, name or path, or
-    nesting). Invalid entries are carried along unchanged.
+    Raises ``RefusedError`` when ``volume`` breaks a rule a read would apply
+    (with ``DEFAULT_MOUNT_BASE``), or clashes with a registered volume
+    (duplicate UUID, name or path). Invalid entries are carried along
+    unchanged.
     """
-    problem = _entry_problem(_fields(volume), NO_MOUNT_BASE)
+    problem = _entry_problem(_fields(volume), DEFAULT_MOUNT_BASE)
     if problem is not None:
         raise RefusedError(problem, detail=f"registry entry refused: {problem}")
     for registered in registry.volumes:

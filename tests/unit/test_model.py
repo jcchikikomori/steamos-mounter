@@ -25,7 +25,7 @@ def volume(name: str, uuid: str) -> Volume:
     return Volume(
         name=name,
         uuid=uuid,
-        path=f"/home/deck/{name}",
+        path=f"/run/media/deck/{name}",
         fstype="ntfs",
         drivers=None,
         nosuid=True,

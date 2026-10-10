@@ -22,6 +22,7 @@ from steamos_mounter.config import emit, load, parse, save, with_volume, without
 from steamos_mounter.errors import RefusedError, RegistryError, UsageError
 from steamos_mounter.locks import registry_lock
 from steamos_mounter.model import Driver, InvalidEntry, Mode, Registry, Step, Volume
+from steamos_mounter.platforms import steamos
 from tests.helpers import builders
 from tests.helpers.builders import (
     MEDIABOX,
@@ -33,6 +34,7 @@ from tests.helpers.builders import (
 )
 
 MOUNT_BASE = "/run/media/deck"
+NOT_BASE_CHILD = "path must be directly under the mount base"
 ETC = "etc/steamos-mounter"
 LOCKS = "run/steamos-mounter/locks"
 HEADER = (
@@ -252,8 +254,9 @@ VALID_ROWS = [
     pytest.param(
         {"uuid": "658207D5-5177-4A52-A297-31643C64724D"}, id="uuid-rfc4122-upper"
     ),
-    pytest.param({"path": "/mnt/media box"}, id="path-with-space"),
-    pytest.param({"path": "/home/deck/Drives/A+B"}, id="path-under-home-deck"),
+    pytest.param({"path": "/run/media/deck/media box"}, id="path-with-space"),
+    pytest.param({"path": "/run/media/deck/A+B"}, id="path-with-plus"),
+    pytest.param({"path": "/run/media/deck/OTHER"}, id="path-leaf-not-the-name"),
     pytest.param({"fstype": "exfat"}, id="fstype-exfat"),
     pytest.param({"fstype": "vfat"}, id="fstype-vfat"),
     pytest.param({"fstype": "btrfs"}, id="fstype-btrfs"),
@@ -314,20 +317,26 @@ INVALID_ROWS = [
     pytest.param({"uuid": "../../etc"}, "uuid: not a valid UUID", id="uuid-traversal"),
     # path
     pytest.param({"path": None}, "missing key 'path'", id="path-missing"),
-    pytest.param({"path": ["/mnt/a"]}, "path: must be a string", id="path-list"),
+    pytest.param(
+        {"path": ["/run/media/deck/a"]}, "path: must be a string", id="path-list"
+    ),
     pytest.param(
         {"path": "run/media/deck/A"}, "path must be absolute", id="path-relative"
     ),
     pytest.param(
-        {"path": "/mnt/a/"}, "path must not end with /", id="path-trailing-slash"
+        {"path": "/run/media/deck/a/"},
+        "path must not end with /",
+        id="path-trailing-slash",
     ),
     pytest.param(
-        {"path": "/mnt/../etc"},
+        {"path": "/run/media/deck/../etc"},
         "path must not contain . or .. components",
         id="path-dotdot",
     ),
     pytest.param(
-        {"path": "/mnt/a\tb"}, "path contains a control character", id="path-control"
+        {"path": "/run/media/deck/a\tb"},
+        "path contains a control character",
+        id="path-control",
     ),
     pytest.param(
         {"path": "/home/deck"}, "path is a protected directory", id="path-protected"
@@ -347,6 +356,19 @@ INVALID_ROWS = [
         {"path": MOUNT_BASE},
         "path is the mount base or one of its parents",
         id="path-mount-base",
+    ),
+    # rule 9 (DD-34): only direct children of the mount base
+    pytest.param({"path": "/mnt/media box"}, NOT_BASE_CHILD, id="path-mnt"),
+    pytest.param(
+        {"path": "/home/deck/Drives/A+B"}, NOT_BASE_CHILD, id="path-under-home-deck"
+    ),
+    pytest.param(
+        {"path": "/run/media/deck/STICK/sub/A"},
+        NOT_BASE_CHILD,
+        id="path-under-a-mounted-stick",
+    ),
+    pytest.param(
+        {"path": "/run/media/other"}, NOT_BASE_CHILD, id="path-sibling-of-the-base"
     ),
     # fstype (DD-07)
     pytest.param({"fstype": None}, "missing key 'fstype'", id="fstype-missing"),
@@ -529,16 +551,10 @@ def _three(first: dict, second: dict) -> str:
     [
         ({"uuid": "AAAA-BBBB"}, {"uuid": "aaaa-bbbb"}, "duplicate uuid"),
         ({"name": "DRIVE"}, {"name": "drive"}, "duplicate name"),
-        ({"path": "/mnt/x"}, {"path": "/mnt/x"}, "duplicate path"),
         (
-            {"path": "/mnt/x"},
-            {"path": "/mnt/x/y"},
-            "path nested with another entry's path",
-        ),
-        (
-            {"path": "/mnt/x/y/z"},
-            {"path": "/mnt/x"},
-            "path nested with another entry's path",
+            {"path": "/run/media/deck/x"},
+            {"path": "/run/media/deck/x"},
+            "duplicate path",
         ),
     ],
 )
@@ -552,12 +568,57 @@ def test_duplicate_uuid_name_path_refused(first, second, reason):
     ]
 
 
-def test_path_sharing_a_prefix_is_not_nested():
+def test_path_sharing_a_prefix_is_not_a_duplicate():
     registry = parse(
-        _three({"path": "/mnt/A"}, {"path": "/mnt/AB"}), mount_base=MOUNT_BASE
+        _three({"path": "/run/media/deck/A"}, {"path": "/run/media/deck/AB"}),
+        mount_base=MOUNT_BASE,
     )
 
     assert registry.invalid == ()
+
+
+@pytest.mark.parametrize("inner", ["/run/media/deck/x/y", "/run/media/deck/x/y/z"])
+def test_nested_paths_leave_only_the_inner_entry_invalid(inner):
+    """Since rule 9 two valid entries cannot nest: the inner one is refused on
+    its own (DD-34), and the outer one still works."""
+    registry = parse(
+        _three({"path": "/run/media/deck/x"}, {"path": inner}), mount_base=MOUNT_BASE
+    )
+
+    assert [volume.name for volume in registry.volumes] == ["MEDIABOX", "GAMES"]
+    assert registry.invalid == (
+        InvalidEntry(
+            index=1, uuid="658207d5-5177-4a52-a297-31643c64724d", reason=NOT_BASE_CHILD
+        ),
+    )
+
+
+def test_path_outside_the_base_is_one_more_invalid_entry():
+    """Rule 9 on every read (DD-34): the entry is invalid like any other, its
+    UUID still blocks auto-mounting, and every other entry works."""
+    registry = parse(
+        _three({"path": "/home/deck/Drives/MEDIABOX"}, {}), mount_base=MOUNT_BASE
+    )
+
+    assert [volume.name for volume in registry.volumes] == ["PERSONAL", "GAMES"]
+    assert registry.invalid == (
+        InvalidEntry(index=0, uuid="01D95F1575592A30", reason=NOT_BASE_CHILD),
+    )
+    assert "01d95f1575592a30" in registry.blocked_uuids()
+
+
+def test_parse_without_a_mount_base_uses_the_steamos_base():
+    """``parse(text)`` (the Design Doc signature) must not mark every base
+    child invalid: without a platform it applies the SteamOS mount base."""
+    registry = parse(DESIGN_EXAMPLE)
+
+    assert [volume.name for volume in registry.volumes] == ["MEDIABOX", "PERSONAL"]
+    assert registry.invalid == ()
+    assert parse(_one_entry(path="/mnt/x")).invalid[0].reason == NOT_BASE_CHILD
+
+
+def test_default_mount_base_is_the_steamos_platform_base():
+    assert config.DEFAULT_MOUNT_BASE == steamos.MOUNT_BASE
 
 
 def test_duplicate_of_an_invalid_entry_does_not_spread():
@@ -577,7 +638,9 @@ def test_duplicate_of_an_invalid_entry_does_not_spread():
 def test_three_way_duplicate_marks_all_three():
     tables = [
         raw_volume_table(
-            volume_fields(dataclasses.replace(MEDIABOX, name=f"N{i}", path=f"/mnt/{i}"))
+            volume_fields(
+                dataclasses.replace(MEDIABOX, name=f"N{i}", path=f"{MOUNT_BASE}/N{i}")
+            )
         )
         for i in range(3)
     ]
@@ -647,11 +710,15 @@ def test_emit_writes_every_driver_token_and_false_flags():
 
 
 def test_emit_escapes_backslash_quote_and_control_characters():
-    volume = dataclasses.replace(MEDIABOX_VOLUME, path='/mnt/a"b\\c\x00d\x1fe\x7ff\tgé')
+    volume = dataclasses.replace(
+        MEDIABOX_VOLUME, path='/run/media/deck/a"b\\c\x00d\x1fe\x7ff\tgé'
+    )
 
     text = emit(Registry(schema_version=1, volumes=(volume,), invalid=()))
 
-    assert 'path = "/mnt/a\\"b\\\\c\\u0000d\\u001Fe\\u007Ff\\u0009gé"\n' in text
+    assert (
+        'path = "/run/media/deck/a\\"b\\\\c\\u0000d\\u001Fe\\u007Ff\\u0009gé"\n'
+    ) in text
 
 
 def test_emit_leaves_out_invalid_entries():
@@ -707,10 +774,13 @@ def test_with_volume_keeps_invalid_entries():
     ("changes", "reason"),
     [
         (
-            {"uuid": "01d95f1575592a30", "name": "OTHER", "path": "/mnt/o"},
+            {"uuid": "01d95f1575592a30", "name": "OTHER", "path": f"{MOUNT_BASE}/O"},
             "duplicate uuid",
         ),
-        ({"uuid": "AAAA-BBBB", "name": "mediabox", "path": "/mnt/o"}, "duplicate name"),
+        (
+            {"uuid": "AAAA-BBBB", "name": "mediabox", "path": f"{MOUNT_BASE}/O"},
+            "duplicate name",
+        ),
         ({"uuid": "AAAA-BBBB", "name": "OTHER"}, "duplicate path"),
         (
             {
@@ -718,7 +788,7 @@ def test_with_volume_keeps_invalid_entries():
                 "name": "OTHER",
                 "path": "/run/media/deck/MEDIABOX/in",
             },
-            "path nested with another entry's path",
+            NOT_BASE_CHILD,
         ),
     ],
 )
@@ -737,6 +807,8 @@ def test_with_volume_refuses_duplicates_and_nesting(changes, reason):
         ({"name": "bad name"}, "name: not a valid registry name"),
         ({"uuid": "nope"}, "uuid: not a valid UUID"),
         ({"path": "/etc/x"}, "path is at or under a system directory"),
+        ({"path": "/mnt/x"}, NOT_BASE_CHILD),
+        ({"path": "/home/deck/Drives/x"}, NOT_BASE_CHILD),
         ({"fstype": "ext4"}, "fstype: not a supported filesystem type"),
         (
             {"fstype": "exfat", "drivers": (Step(Driver.NTFS3, Mode.RW),)},

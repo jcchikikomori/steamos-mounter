@@ -68,6 +68,7 @@ NTFS_RO_OPTIONS = "ro," + NTFS_RW_OPTIONS
 FORBIDDEN = ("noexec", "force", "remove_hiberfile")
 
 MEDIABOX_TARGET = "/run/media/deck/MEDIABOX"
+NOT_BASE_CHILD = "path must be directly under the mount base"
 PERSONAL_TARGET = "/run/media/deck/PERSONAL"
 GAMES_TARGET = "/run/media/deck/GAMES"
 PERSONAL_MAPPER = "/dev/mapper/steamos-mounter-658207d5-5177-4a52-a297-31643c64724d"
@@ -1085,11 +1086,14 @@ def test_prepare_target_accepts_a_unicode_auto_name(ctx, base):
     assert (base / "MÉDIA").is_dir()
 
 
-def test_prepare_target_accepts_a_fixed_path_outside_the_base(ctx, tmp_path, base):
+def test_prepare_target_refuses_a_fixed_path_outside_the_base(ctx, tmp_path, base):
+    """Rule 9 (DD-34): only children of the mount base are mount targets."""
     (tmp_path / "home/deck/Drives").mkdir(parents=True)
 
-    assert prepare_target(ctx, "/home/deck/Drives/MEDIABOX") is True
-    assert (tmp_path / "home/deck/Drives/MEDIABOX").is_dir()
+    with pytest.raises(RefusedError, match=NOT_BASE_CHILD):
+        prepare_target(ctx, "/home/deck/Drives/MEDIABOX")
+
+    assert not (tmp_path / "home/deck/Drives/MEDIABOX").exists()
 
 
 @pytest.mark.parametrize(
@@ -1098,15 +1102,17 @@ def test_prepare_target_accepts_a_fixed_path_outside_the_base(ctx, tmp_path, bas
         ("non_empty", MEDIABOX_TARGET, "not empty"),
         ("file", MEDIABOX_TARGET, "not a directory"),
         ("symlink", MEDIABOX_TARGET, "not a directory"),
-        (None, "/home/deck/Drives/MEDIABOX", "parent directory does not exist"),
-        (None, "/etc/MEDIABOX", "system directory"),
-        (None, "/run/media/deck/MEDIABOX/inner", "parent directory does not exist"),
-        (None, "/run/media/deck/..", "path"),
+        (None, "/home/deck/Drives/MEDIABOX", NOT_BASE_CHILD),
+        (None, "/etc/MEDIABOX", NOT_BASE_CHILD),
+        (None, "/run/media/deck/MEDIABOX/inner", NOT_BASE_CHILD),
+        (None, "/run/media/deck/..", "not normalized"),
+        (None, "/run/media/deck/.", "not normalized"),
         (None, "/run/media/deck/", "not normalized"),
-        ("file", MEDIABOX_TARGET + "/inner", "parent directory does not exist"),
+        (None, "/run/media/deck//MEDIABOX", "not normalized"),
+        ("file", MEDIABOX_TARGET + "/inner", NOT_BASE_CHILD),
         (None, "/run/media/deck/A\x07B", "control character"),
-        (None, "/run/media/deck", "mount base"),
-        (None, "run/media/deck/MEDIABOX", "absolute"),
+        (None, "/run/media/deck", NOT_BASE_CHILD),
+        (None, "run/media/deck/MEDIABOX", NOT_BASE_CHILD),
     ],
 )
 def test_prepare_target_refusals(ctx, base, setup, target, message):
@@ -1131,7 +1137,7 @@ def test_prepare_target_symlinked_parent_is_refused(ctx, tmp_path, base):
     )
     (tmp_path / "etc").mkdir()
 
-    with pytest.raises(RefusedError, match="parent directory does not exist"):
+    with pytest.raises(RefusedError, match=NOT_BASE_CHILD):
         prepare_target(ctx, "/home/deck/Drives/MEDIABOX")
 
     assert not (tmp_path / "etc/MEDIABOX").exists()

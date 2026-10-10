@@ -17,6 +17,12 @@ Rule 8 (trusted parent directories) closes the mount-target race. Root
 checks the target by path and ``mount(8)`` follows a symlink at the leaf, so
 no one but root may be able to change a directory above the target between
 the check and the mount.
+
+Rule 9 (base child) closes what rule 8 cannot see: a mount point between the
+base and the leaf can be swapped without changing any owner or mode. With
+exactly one component below the mount base there is no room for one. Rules 2
+to 4 are subsumed by rule 9 and stay as defence in depth, ahead of it, so
+their reason texts do not change.
 """
 
 import posixpath
@@ -39,6 +45,7 @@ NO_FREE_NAME: Final = "no_free_name"
 UNTRUSTED_PARENT: Final = (
     "a parent directory is a symlink or writable by a non-root user"
 )
+NOT_BASE_CHILD: Final = "path must be directly under the mount base"
 
 # sanitize_label step 3: replaced besides surrogates and every C* category.
 _DENIED_CHARACTERS: Final = frozenset("/\\<>&;|*?\"'$`")
@@ -248,6 +255,15 @@ def _location_problem(path: str, mount_base: str) -> str | None:
     return None
 
 
+def is_base_child(path: str, mount_base: str) -> bool:
+    """Rule 9: the parent of ``path`` is exactly ``mount_base``, by text.
+
+    No path is resolved: ``/var/run/media/deck/X`` is not a child of
+    ``/run/media/deck`` even where ``/var/run`` links to ``/run``.
+    """
+    return posixpath.dirname(path) == mount_base
+
+
 def _entry_problem(path: str, fs: PathFacts) -> str | None:
     """Rule 5: an existing non-empty directory or non-directory."""
     kind = fs.kind(path)
@@ -290,11 +306,14 @@ def validate_fixed_path(
 ) -> None:
     """Refuse ``path`` as a fixed mount path unless it passes every rule.
 
-    ``other_paths`` holds the other registered paths and the current
-    steamos-mounter mounts. Raises ``RefusedError`` (exit 8) whose message is
-    the reason.
+    Order: the lexical rules 1 to 4 and 9, then the disk rules 5 to 8, so a
+    lexically refused path is never looked at. ``other_paths`` holds the
+    other registered paths and the current steamos-mounter mounts. Raises
+    ``RefusedError`` (exit 8) whose message is the reason.
     """
     reason = _syntax_problem(path) or _location_problem(path, mount_base)
+    if reason is None and not is_base_child(path, mount_base):
+        reason = NOT_BASE_CHILD
     if reason is None:
         reason = _entry_problem(path, fs)
     if reason is None and _overlaps(path, other_paths):

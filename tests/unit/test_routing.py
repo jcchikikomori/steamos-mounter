@@ -696,14 +696,24 @@ def test_stale_link_with_an_absent_registry_file():
     assert (found.action, found.reason) == (Action.IGNORE, "stale link")
 
 
-def test_invalid_registry_entry_is_refused():
+@pytest.mark.parametrize(
+    "path",
+    [
+        pytest.param("/etc/x", id="system-directory"),
+        pytest.param("/home/deck/Drives/GAMES", id="not-under-the-base"),
+        pytest.param(f"{MOUNT_BASE}/STICK/sub/GAMES", id="under-a-mounted-stick"),
+    ],
+)
+def test_invalid_registry_entry_is_refused(path):
+    """A path that is not a direct child of the base (DD-34) is one more
+    invalid entry: the same ``registry_entry_invalid`` refusal."""
     text = raw_registry_text(
         [
             raw_volume_table(
                 {
                     "name": "GAMES",
                     "uuid": STICK_UUID,
-                    "path": "/etc/x",
+                    "path": path,
                     "fstype": "exfat",
                 }
             )
