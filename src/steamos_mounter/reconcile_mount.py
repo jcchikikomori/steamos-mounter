@@ -43,7 +43,14 @@ from steamos_mounter.errors import MounterError
 from steamos_mounter.model import Mode, MountInfo, Registry, Step, Trigger, VolumeState
 from steamos_mounter.mountdirs import HostPathFacts
 from steamos_mounter.mounter import ChainResult
-from steamos_mounter.records import Record, load_record
+from steamos_mounter.records import (
+    MOUNT_MOUNTED,
+    MOUNT_PENDING,
+    OWN_MOUNT_STATUSES,
+    Record,
+    load_record,
+    own_mount_target,
+)
 from steamos_mounter.routing import Action, Route, RoutingInput
 
 if TYPE_CHECKING:
@@ -57,10 +64,10 @@ NTFS: Final = "ntfs"
 CRYPT_TYPE: Final = "crypt"
 FUSE_FSTYPE: Final = "fuseblk"
 FUSE_DRIVER: Final = "ntfs-3g"
-PENDING: Final = "pending"
-MOUNTED: Final = "mounted"
+PENDING: Final = MOUNT_PENDING
+MOUNTED: Final = MOUNT_MOUNTED
 UNMOUNTED: Final = "unmounted"
-OWN_STATUSES: Final = frozenset({PENDING, MOUNTED})
+OWN_STATUSES: Final = OWN_MOUNT_STATUSES
 REASON_UNKNOWN: Final = report.REASON_UNKNOWN
 REASON_HELD: Final = "held"
 REASON_DEVICE_BUSY: Final = "device_busy"
@@ -192,7 +199,7 @@ def _held_check(
     """Already mounted, mounted elsewhere, held, or None to go on and mount."""
     dm_name = job.route.mapping_name if job.route.inner else None
     found = mounts.for_device(table, job.target_device, dm_name)
-    own = _own_target(previous)
+    own = own_mount_target(previous)
     at_own = [row for row in found if row.target == own]
     if previous is not None and at_own:
         return _already_mounted(job, stamp, previous, at_own[-1])
@@ -401,14 +408,6 @@ def _current(ctx: "Context", owner: report.Owner) -> Record | None:
     return found if isinstance(found, Record) else None
 
 
-def _own_target(previous: Record | None) -> str | None:
-    mount = previous.mount if previous is not None else None
-    if not mount or mount.get("status") not in OWN_STATUSES:
-        return None
-    target = mount.get("target")
-    return target if isinstance(target, str) else None
-
-
 def _user_unmounted(
     previous: Record, target_device: BlockDevice, trigger: Trigger
 ) -> bool:
@@ -470,7 +469,7 @@ def _target(job: _Job, table: Sequence[MountInfo]) -> str:
     registry = job.inp.registry
     fixed = [v.path for v in registry.volumes] if isinstance(registry, Registry) else []
     mounted = {row.target for row in table}
-    facts = HostPathFacts(job.ctx.paths)
+    facts = HostPathFacts(job.ctx.paths, trusted_uid=job.ctx.platform.trusted_uid)
 
     def taken(path: str) -> bool:
         if path in mounted or facts.kind(path) in TAKEN_KINDS:

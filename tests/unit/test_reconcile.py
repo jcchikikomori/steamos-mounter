@@ -158,7 +158,7 @@ def facts_text(*, drop: tuple[str, ...] = (), replace: dict[str, str] | None = N
     return "\n".join(lines) + "\n"
 
 
-def write_record(root: Path, relative: str, **changes) -> None:
+def write_record_with(root: Path, relative: str, **changes) -> None:
     path = root / relative
     path.write_text(json.dumps(builders.record_dict(**changes)), encoding="utf-8")
 
@@ -600,7 +600,7 @@ def test_already_mounted_after_a_crash_adopts_the_pending_mount(ctx, deck, fake_
         state="MountFailed", reason="probe_failed", warning=None, next_step=None
     )
     pending["mount"] = dict(pending["mount"], status="pending", driver=None, mode=None)
-    write_record(deck, MEDIABOX_RECORD, **pending)
+    write_record_with(deck, MEDIABOX_RECORD, **pending)
     script_lsblk(fake_runner, "lsblk-columns-tree.json")
     fake_runner.on(TABLE_ARGV, TABLE_WITH_MEDIABOX)
 
@@ -618,7 +618,7 @@ def test_already_mounted_after_a_crash_adopts_the_pending_mount(ctx, deck, fake_
 
 def test_no_remount_after_user_unmount(ctx, deck, fake_runner, fake_kmsg):
     """AC-033: a reload does not undo the owner's unmount; a start does."""
-    write_record(
+    write_record_with(
         deck,
         MEDIABOX_RECORD,
         **mediabox_record(
@@ -665,7 +665,7 @@ def test_user_unmount_is_scoped_to_the_mapping_devnum(
     known_os_set(tmp_path)
     make_mount_base(tmp_path)
     add_dolphin_sysfs(host_tree)
-    write_record(
+    write_record_with(
         tmp_path,
         SDC1_RECORD,
         kind="auto",
@@ -693,7 +693,7 @@ def test_fresh_cli_request_turns_reload_into_cli_and_is_cleared(
     ctx, deck, fake_runner, fake_kmsg, seconds_ago
 ):
     """D014: a fresh marker overrides the user-unmount rule like a start would."""
-    write_record(
+    write_record_with(
         deck,
         MEDIABOX_RECORD,
         **mediabox_record(
@@ -724,7 +724,7 @@ def test_fresh_cli_request_turns_reload_into_cli_and_is_cleared(
 @pytest.mark.parametrize("at", ["stale", "garbage", None], ids=str)
 def test_stale_cli_request_is_cleared_and_ignored(ctx, deck, fake_runner, at):
     stamp = {"stale": timestamp(ctx, 121), "garbage": "yesterday", None: None}[at]
-    write_record(
+    write_record_with(
         deck,
         MEDIABOX_RECORD,
         **mediabox_record(
@@ -747,7 +747,7 @@ def test_stale_cli_request_is_cleared_and_ignored(ctx, deck, fake_runner, at):
 
 
 def test_start_trigger_also_clears_a_cli_request(ctx, deck, fake_runner):
-    write_record(
+    write_record_with(
         deck,
         MEDIABOX_RECORD,
         **mediabox_record(cli_request={"token": "0123456789abcdef", "at": "x"}),
@@ -790,7 +790,7 @@ def test_mounted_elsewhere_recorded(ctx, deck, fake_runner, caplog):
 
 
 def test_mounted_elsewhere_marks_a_previous_own_mount_unmounted(ctx, deck, fake_runner):
-    write_record(deck, MEDIABOX_RECORD, **mediabox_record())
+    write_record_with(deck, MEDIABOX_RECORD, **mediabox_record())
     script_lsblk(fake_runner, "lsblk-columns-tree.json")
     fake_runner.on(TABLE_ARGV, table_with_mediabox_at("/run/media/deck/MEDIABOX1"))
 
@@ -1263,7 +1263,7 @@ def test_tool_mapping_keeps_the_openers_mapping_fields(
         "key_unit_invocation_id": "a" * 32,
         "save_pending": True,
     }
-    write_record(
+    write_record_with(
         tmp_path,
         PERSONAL_RECORD,
         state="NeedsKey",
@@ -1359,7 +1359,7 @@ def test_inner_device_not_listed_yet_keeps_the_key_units_mapping(
         "key_unit_invocation_id": "a" * 32,
         "save_pending": True,
     }
-    write_record(
+    write_record_with(
         tmp_path,
         PERSONAL_RECORD,
         state="NeedsKey",
@@ -1400,7 +1400,7 @@ def test_inner_device_not_listed_yet_drops_a_mapping_of_another_name(
         "key_unit_invocation_id": None,
         "save_pending": False,
     }
-    write_record(
+    write_record_with(
         tmp_path, PERSONAL_RECORD, state="NotMounted", mapping=stale, mount=None
     )
     script_lsblk(fake_runner, "lsblk-tree-personal-locked.json")
@@ -1543,6 +1543,72 @@ def test_stored_key_tried_once(ctx, deck, fake_runner, locked, trees, caplog):
     assert {sm_fields(r)["SM_REASON"] for r in logged} == {"stored_key_rejected"}
 
 
+# The key path's session check ends where the notify path's does:
+# HANDLER_DEADLINE + NOTIFY_AFTER_DEADLINE = 60 + 20 = 80 s into the pass.
+KEY_PATH_BUDGET = 80.0
+
+
+def test_key_path_session_check_with_time_left_starts_the_key_unit(
+    ctx, deck, fake_runner, fake_clock, locked, trees
+):
+    """Owner decision 2026-10-10: the session check gets the notify deadline.
+
+    cryptsetup ends 75 s into the pass, so 5 s are left: every loginctl query
+    is capped at 5 s (not its own 10 s), and the key unit still starts.
+    """
+    write_key_file(deck, PERSONAL_UUID, TEST_KEY)
+    fake_runner.on(
+        CRYPTSETUP,
+        Answer(returncode=2),
+        hook=lambda _command: fake_clock.advance(KEY_PATH_BUDGET - 5),
+    )
+    script_desktop_session(fake_runner)
+    fake_runner.on(START_KEY_UNIT, Answer())
+
+    outcome = reconcile.run(
+        ctx, InstanceKind.REGISTERED, PERSONAL_DEVICE, Trigger.START
+    )
+
+    assert (outcome.state, outcome.reason) == (
+        VolumeState.NEEDS_KEY,
+        "stored_key_rejected",
+    )
+    timeouts = [c.timeout for c in fake_runner.calls if c.argv[0] == LOGINCTL]
+    assert timeouts == [5.0, 5.0, 5.0]
+    assert argvs_of(fake_runner, SYSTEMCTL) == [START_KEY_UNIT]
+
+
+def test_key_path_session_check_out_of_time_is_not_sure_and_starts_nothing(
+    ctx, deck, fake_runner, fake_clock, locked, trees
+):
+    """Out of time -> NeedsKey ``session_not_sure``; no loginctl, no key unit."""
+    write_key_file(deck, PERSONAL_UUID, TEST_KEY)
+    fake_runner.on(
+        CRYPTSETUP,
+        Answer(returncode=2),
+        hook=lambda _command: fake_clock.advance(KEY_PATH_BUDGET + 1),
+    )
+    script_desktop_session(fake_runner)
+    fake_runner.on(START_KEY_UNIT, Answer())
+
+    outcome = reconcile.run(
+        ctx, InstanceKind.REGISTERED, PERSONAL_DEVICE, Trigger.START
+    )
+
+    assert (outcome.state, outcome.reason) == (
+        VolumeState.NEEDS_KEY,
+        "session_not_sure",
+    )
+    assert argvs_of(fake_runner, LOGINCTL) == []
+    assert argvs_of(fake_runner, SYSTEMCTL) == []
+    record = read_record(deck, PERSONAL_RECORD)
+    assert (record["state"], record["reason"]) == ("NeedsKey", "session_not_sure")
+    assert record["warning"] == (
+        "The stored key did not work, and the Desktop Mode session could not be"
+        " confirmed for the key dialog."
+    )
+
+
 def test_no_session_needs_key(ctx, deck, fake_runner, locked, trees, caplog):
     """AC-075: no Desktop Mode session -> no dialog anywhere, "needs a key"."""
     write_key_file(deck, PERSONAL_UUID, TEST_KEY)
@@ -1620,7 +1686,7 @@ def test_fresh_cli_request_starts_the_key_unit_for_a_missing_key(
 ):
     """D014: ``mount --volume`` in Desktop Mode starts the key unit (AC-075)."""
     make_keys_dir(deck)
-    write_record(
+    write_record_with(
         deck,
         PERSONAL_RECORD,
         state="NeedsKey",
@@ -1720,7 +1786,7 @@ def test_unlock_mounts_on_a_cli_request_despite_an_old_user_unmount(
 ):
     """D014, DD-11: the CLI marker survives the write-ahead; a new mapping mounts."""
     write_key_file(deck, PERSONAL_UUID, TEST_KEY)
-    write_record(
+    write_record_with(
         deck,
         PERSONAL_RECORD,
         state="UnmountedByUser",
@@ -1862,7 +1928,7 @@ def test_key_unit_name_is_the_registered_instance():
 
 def dialog_open_record(root: Path) -> None:
     """What the key unit leaves while its password dialog is open."""
-    write_record(
+    write_record_with(
         root,
         PERSONAL_RECORD,
         state="NeedsKey",
@@ -2015,7 +2081,7 @@ def test_read_back_failure_is_recorded_as_probe_failed(ctx, deck, fake_runner):
 
 def test_lsblk_failure_updates_an_existing_registered_record(ctx, deck, fake_runner):
     """IP-04: lsblk failing is MountFailed probe_failed when a record exists."""
-    write_record(deck, MEDIABOX_RECORD, **mediabox_record())
+    write_record_with(deck, MEDIABOX_RECORD, **mediabox_record())
     fake_runner.on(LSBLK_ARGV, Answer(returncode=1, stderr=b"lsblk: broken\n"))
 
     outcome = reconcile.run(

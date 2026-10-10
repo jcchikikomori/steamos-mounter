@@ -215,10 +215,14 @@ def _check_uuid(value: object, _mount_base: str) -> str | None:
 
 
 class _AssumeFree:
-    """``PathFacts`` that skips the disk: every path is an empty directory."""
+    """``PathFacts`` that skips the disk: every path is an empty directory,
+    and every parent a trusted one."""
 
     def kind(self, path: str) -> PathKind:
         return PathKind.EMPTY_DIR
+
+    def trusted_dir(self, path: str) -> bool:
+        return True
 
 
 def _check_path(value: object, mount_base: str) -> str | None:

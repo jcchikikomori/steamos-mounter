@@ -355,14 +355,17 @@ def test_auto_unplug_removes_mount_dir_and_deletes_record(
         MountedRW, mount.target GAMES_PATH, created_dir true, mapping null,
         source devnum "8:33"); tmp_path/run/media/deck/GAMES exists, empty;
         no /sys/dev/block/8:33
-      - FakeRunner: umount -l /run/media/deck/GAMES -> rc 0
+      - FakeRunner: findmnt read-back of /run/media/deck/GAMES ->
+        findmnt-games-exfat-rw.json (the mount is still there); umount -l
+        /run/media/deck/GAMES -> rc 0
     When
       - teardown.stop(ctx, InstanceKind.AUTO, SDC1_SYSPATH)
       - teardown.sweep(ctx, InstanceKind.AUTO, SDC1_SYSPATH,
         ServiceResult(result="success", exit_code="killed",
         exit_status="TERM"))
     Then (pass criteria)
-      - exactly one umount -l call and no dmsetup or cryptsetup call
+      - stop and sweep make exactly the read-back and one umount -l call, in
+        that order, and no dmsetup or cryptsetup call
       - tmp_path/run/media/deck/GAMES is gone; tmp_path/run/media/deck stays
         (never removed, only the leaf, DD-26)
       - after the sweep tmp_path/SDC1_RECORD does not exist; the sweep logged
@@ -388,9 +391,11 @@ def test_auto_unplug_removes_mount_dir_and_deletes_record(
             ),
         )
     calls = len(fake_runner.calls)
+    first_argvs = fake_runner.argvs
     again = teardown.stop(ctx, InstanceKind.AUTO, SDC1_SYSPATH)
 
     assert report.unplugged is True
+    assert first_argvs == [readback_argv(GAMES_PATH), (UMOUNT, "-l", GAMES_PATH)]
     assert [argv for argv in fake_runner.argvs if argv[0] == UMOUNT] == [
         (UMOUNT, "-l", GAMES_PATH)
     ]

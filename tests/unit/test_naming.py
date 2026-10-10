@@ -334,9 +334,19 @@ def test_unique_auto_path_refuses_unsanitized_name(name: str):
 
 
 class FakePathFacts:
-    """``PathFacts`` from a table; every path not listed is missing."""
+    """``PathFacts`` from a table; every path not listed is missing.
 
-    def __init__(self, entries: dict[str, PathKind] | None = None) -> None:
+    Ownership is injected here, since the tests do not run as root: every
+    directory counts as trusted (root-owned, no group or other write bit)
+    unless it is listed in ``untrusted``.
+    """
+
+    def __init__(
+        self,
+        entries: dict[str, PathKind] | None = None,
+        *,
+        untrusted: Iterable[str] = (),
+    ) -> None:
         self.entries = {
             "/": PathKind.NON_EMPTY_DIR,
             "/home/deck": PathKind.NON_EMPTY_DIR,
@@ -344,11 +354,16 @@ class FakePathFacts:
             BASE: PathKind.NON_EMPTY_DIR,
             **(entries or {}),
         }
+        self.untrusted = frozenset(untrusted)
         self.asked: list[str] = []
 
     def kind(self, path: str) -> PathKind:
         self.asked.append(path)
         return self.entries.get(path, PathKind.MISSING)
+
+    def trusted_dir(self, path: str) -> bool:
+        self.asked.append(path)
+        return path not in self.untrusted
 
 
 def validate(
@@ -524,3 +539,75 @@ def test_fixed_path_rule7_empty_parent_is_accepted():
     fs = FakePathFacts({"/home/deck/Drives": PathKind.EMPTY_DIR})
 
     assert validate("/home/deck/Drives/GAMES", fs=fs) is None
+
+
+# --- rule 8: trusted parent directories (owner decision 2026-10-10, option A) ----
+
+UNTRUSTED_PARENT = "a parent directory is a symlink or writable by a non-root user"
+DRIVES = "/home/deck/Drives"
+
+
+@pytest.mark.parametrize(
+    ("path", "untrusted"),
+    [
+        pytest.param(f"{DRIVES}/GAMES", "/home/deck", id="deck-owned-home"),
+        pytest.param(f"{DRIVES}/GAMES", DRIVES, id="untrusted-parent"),
+        pytest.param(f"{DRIVES}/GAMES", "/home", id="untrusted-grandparent"),
+        pytest.param(f"{DRIVES}/GAMES", "/", id="untrusted-root"),
+        pytest.param(f"{BASE}/GAMES", BASE, id="untrusted-mount-base"),
+        pytest.param(f"{BASE}/GAMES", "/run", id="untrusted-run"),
+    ],
+)
+def test_fixed_path_rule8_refuses_an_untrusted_parent(path: str, untrusted: str):
+    fs = FakePathFacts({DRIVES: PathKind.EMPTY_DIR}, untrusted=[untrusted])
+
+    with pytest.raises(RefusedError) as raised:
+        validate(path, fs=fs)
+
+    assert raised.value.user_message == UNTRUSTED_PARENT
+    assert raised.value.exit_code == ExitCode.REFUSED
+    assert raised.value.detail == (f"fixed path {path!r} refused: {UNTRUSTED_PARENT}")
+
+
+def test_fixed_path_rule8_checks_every_parent_from_the_root():
+    fs = FakePathFacts({DRIVES: PathKind.EMPTY_DIR})
+
+    validate(f"{DRIVES}/GAMES", fs=fs)
+
+    assert [path for path in fs.asked if path != f"{DRIVES}/GAMES"] == [
+        DRIVES,  # rule 7
+        "/",
+        "/home",
+        "/home/deck",
+        DRIVES,
+    ]
+
+
+def test_fixed_path_rule8_never_asks_about_the_leaf():
+    """An existing leaf is rule 5's business: it may be owned by anyone."""
+    leaf = f"{BASE}/GAMES"
+    fs = FakePathFacts({leaf: PathKind.EMPTY_DIR}, untrusted=[leaf])
+
+    assert validate(leaf, fs=fs) is None
+
+
+def test_fixed_path_rule7_wins_over_rule8_for_a_missing_parent():
+    fs = FakePathFacts(untrusted=[DRIVES])
+
+    with pytest.raises(RefusedError, match=PARENT_MISSING):
+        validate(f"{DRIVES}/GAMES", fs=fs)
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        ("/run/media/deck/GAMES", True),
+        ("/home/deck/Drives/GAMES", False),
+        ("/GAMES", True),
+    ],
+)
+def test_untrusted_parent_check_on_its_own(path: str, expected: bool):
+    """``mountdirs`` asks rule 8 alone for an auto name under the mount base."""
+    fs = FakePathFacts(untrusted=["/home/deck"])
+
+    assert naming.has_trusted_parents(path, fs) is expected

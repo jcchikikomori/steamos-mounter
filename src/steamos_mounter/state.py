@@ -8,8 +8,11 @@ Output", DD-22 and I006. The ``/run`` tree and the records themselves live in
   (AC-063); the record adds what ``findmnt`` cannot know. A record that says
   mounted while nothing is mounted becomes ``UnmountedByUser`` while the
   device is present (the instance is bound to its device, so a present device
-  means a live instance) and ``NotPresent`` once it is gone. ``list`` never
-  writes.
+  means a live instance) and ``NotPresent`` once it is gone. A mount at a
+  registered fixed path that the record does not own (no ``pending`` or
+  ``mounted`` record mount at that target) is ``MountedElsewhere`` at that
+  path: ``list`` never claims a mount the tool did not make. An unreadable
+  record cannot disown it, so findmnt decides then. ``list`` never writes.
 - **Words and next steps**: one table each, keyed by state and reason code;
   ``{cli}`` is the platform's ``cli_root`` (DD-05). Reason codes this module
   does not know render the state's default words and step.
@@ -32,7 +35,14 @@ from steamos_mounter.model import (
     VolumeState,
 )
 from steamos_mounter.mounts import for_device
-from steamos_mounter.records import RECORD_SUFFIX, RECORDS_DIR, Record, load_record
+from steamos_mounter.records import (
+    RECORD_SUFFIX,
+    RECORDS_DIR,
+    UNREADABLE,
+    Record,
+    load_record,
+    own_mount_target,
+)
 
 if TYPE_CHECKING:
     from steamos_mounter.context import Context
@@ -84,6 +94,7 @@ class _Facts:
     kind: InstanceKind
     present: bool
     target: str | None
+    owned_target: str | None  # where the tool's own mount is, per the record
     devices: tuple[BlockDevice, ...]
 
 
@@ -120,16 +131,18 @@ def _registered_view(
     ctx: "Context", volume: Volume, tree: DeviceTree, table: Sequence[MountInfo]
 ) -> VolumeView:
     devices = tree.by_uuid(volume.uuid)
+    found = load_record(ctx, InstanceKind.REGISTERED, volume.uuid)
+    record = found if isinstance(found, Record) else None
     facts = _Facts(
         name=volume.name,
         uuid=volume.uuid,
         kind=InstanceKind.REGISTERED,
         present=bool(devices),
         target=volume.path,
+        owned_target=volume.path if found == UNREADABLE else own_mount_target(record),
         devices=_with_mappings(tree, devices),
     )
-    record = load_record(ctx, InstanceKind.REGISTERED, volume.uuid)
-    return _view(ctx, facts, record if isinstance(record, Record) else None, table)
+    return _view(ctx, facts, record, table)
 
 
 def _auto_view(
@@ -139,12 +152,14 @@ def _auto_view(
     device = tree.devices.get(kname)
     present = device is not None and device.devnum == devnum.replace("_", ":")
     target = record.mount.get("target") if record.mount else None
+    target = target if isinstance(target, str) else None
     facts = _Facts(
         name=record.name,
         uuid=(device.uuid or "") if device is not None and present else "",
         kind=InstanceKind.AUTO,
         present=present,
-        target=target if isinstance(target, str) else None,
+        target=target,
+        owned_target=target,  # an auto path exists only through its record
         devices=_with_mappings(tree, (device,))
         if device is not None and present
         else (),
@@ -189,6 +204,8 @@ def _view(
     at_target = [info for info in table if facts.target and info.target == facts.target]
     if at_target:
         mount = at_target[-1]
+        if facts.owned_target != facts.target:
+            return _build(ctx, facts, record, VolumeState.MOUNTED_ELSEWHERE, mount)
         if mount.read_only:
             mounted_state = VolumeState.MOUNTED_RO
         elif record is not None and record.state is VolumeState.MOUNTED_RW_DIRTY:

@@ -49,6 +49,10 @@ DECK_TREE = "lsblk-columns-tree.json"
 TREE_WITH_GAMES = "lsblk-tree-with-exfat-sdc1.json"
 UNSAFE_PHRASE = "unsafe state (hibernation, Fast Startup, or an abrupt unplug)"
 DIRTY_WARNING = RECORD_EXAMPLE["warning"]
+# The record's own mount of MEDIABOX: a mount at its path that the tool made.
+MEDIABOX_MOUNT = dict(
+    RECORD_EXAMPLE["mount"], target=MEDIABOX_PATH, device="/dev/sdb5", devnum="8:21"
+)
 
 
 def _tree(name: str = DECK_TREE) -> DeviceTree:
@@ -123,7 +127,12 @@ def test_registered_mount_shows_what_findmnt_shows_and_the_records_words(ctx, ru
         ctx,
         InstanceKind.REGISTERED,
         MEDIABOX_KEY,
-        _registered(MEDIABOX_KEY, name="MEDIABOX", warning="MEDIABOX is dirty."),
+        _registered(
+            MEDIABOX_KEY,
+            name="MEDIABOX",
+            warning="MEDIABOX is dirty.",
+            mount=MEDIABOX_MOUNT,
+        ),
     )
 
     views = compute_views(
@@ -188,7 +197,13 @@ def test_findmnt_read_only_beats_a_record_that_says_read_write(ctx, runtime):
         ctx,
         InstanceKind.REGISTERED,
         MEDIABOX_KEY,
-        _registered(MEDIABOX_KEY, name="MEDIABOX", state="MountedRW", reason=None),
+        _registered(
+            MEDIABOX_KEY,
+            name="MEDIABOX",
+            state="MountedRW",
+            reason=None,
+            mount=MEDIABOX_MOUNT,
+        ),
     )
 
     (view,) = compute_views(
@@ -218,6 +233,7 @@ def test_unsafe_read_only_mount_keeps_the_records_reason_and_warning(ctx, runtim
             reason="unsafe",
             warning=warning,
             next_step=None,
+            mount=MEDIABOX_MOUNT,
         ),
     )
 
@@ -305,6 +321,92 @@ def test_registered_container_unlocked_and_mounted_elsewhere(ctx, runtime):
         f"Unmount it there, then run {CLI} mount --volume PERSONAL to use the fixed"
         " path."
     )
+
+
+# --- a mount at the fixed path the tool does not own (owner decision 2026-10-10) --
+
+ELSEWHERE_STEP = (
+    f"Unmount it there, then run {CLI} mount --volume PERSONAL to use the fixed path."
+)
+
+
+def _udisks_mount_at(target: str) -> tuple[MountInfo, ...]:
+    """The synthetic list with udisks' dm-0 row moved to ``target``."""
+    (*others, dm0) = _findmnt("findmnt-list-dm0-at-udisks-path.json")
+    return (*others, dataclasses.replace(dm0, target=target))
+
+
+def _personal_mount(status: str, target: str = PERSONAL_PATH) -> dict:
+    return dict(RECORD_EXAMPLE["mount"], status=status, target=target)
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        pytest.param(None, id="no-record"),
+        pytest.param(
+            {"state": "MountedElsewhere", "reason": None, "mount": None,
+             "warning": None, "next_step": None},
+            id="reconcile-recorded-elsewhere",
+        ),
+        pytest.param(
+            {"state": "MountedRW", "reason": None,
+             "mount": _personal_mount("unmounted")},
+            id="own-mount-already-unmounted",
+        ),
+        pytest.param(
+            {"state": "MountedRW", "reason": None,
+             "mount": _personal_mount("mounted", "/run/media/deck/OLD")},
+            id="own-mount-at-another-target",
+        ),
+    ],
+)  # fmt: skip
+def test_foreign_mount_at_the_fixed_path_is_mounted_elsewhere(ctx, runtime, record):
+    """udisks (or anyone) mounted PERSONAL's inner filesystem at its fixed path."""
+    if record is not None:
+        _write_record(
+            ctx,
+            InstanceKind.REGISTERED,
+            PERSONAL_KEY,
+            _registered(PERSONAL_KEY, **record),
+        )
+
+    (view,) = compute_views(
+        ctx, _registry(PERSONAL), _tree(), _udisks_mount_at(PERSONAL_PATH)
+    )
+
+    assert view.state is VolumeState.MOUNTED_ELSEWHERE
+    assert (view.path, view.driver, view.mode) == (PERSONAL_PATH, "ntfs3", "rw")
+    assert view.reason is None
+    assert words(view.state, view.reason) == "mounted elsewhere"
+    assert view.next_step == ELSEWHERE_STEP
+
+
+@pytest.mark.parametrize("status", ["mounted", "pending"])
+def test_own_mount_at_the_fixed_path_keeps_the_mounted_words(ctx, runtime, status):
+    """The record says the tool mounted (or is mounting) it there."""
+    _write_record(
+        ctx,
+        InstanceKind.REGISTERED,
+        PERSONAL_KEY,
+        _registered(
+            PERSONAL_KEY,
+            state="MountedRW",
+            reason=None,
+            warning=None,
+            next_step=None,
+            mount=_personal_mount(status),
+        ),
+    )
+
+    (view,) = compute_views(
+        ctx, _registry(PERSONAL), _tree(), _udisks_mount_at(PERSONAL_PATH)
+    )
+
+    assert view.state is VolumeState.MOUNTED_RW
+    assert (view.path, view.driver, view.mode) == (PERSONAL_PATH, "ntfs3", "rw")
+    assert words(view.state, view.reason) == "mounted read-write"
+    assert view.next_step == "-"
 
 
 def test_mounting_record_with_nothing_mounted_yet_stays_mounting(ctx, runtime):
@@ -555,6 +657,18 @@ def test_compute_views_never_writes(ctx, runtime):
 
 
 def test_a_mount_at_the_path_without_a_device_in_the_tree_still_counts(ctx, runtime):
+    _write_record(
+        ctx,
+        InstanceKind.REGISTERED,
+        MEDIABOX_KEY,
+        _registered(
+            MEDIABOX_KEY,
+            name="MEDIABOX",
+            state="MountedRW",
+            reason=None,
+            mount=MEDIABOX_MOUNT,
+        ),
+    )
     lone = DeviceTree(devices={}, parents={})
 
     (view,) = compute_views(

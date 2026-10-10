@@ -12,6 +12,11 @@ taken (mount points, non-empty directories, non-directories, registered fixed
 paths), so it never touches the disk itself. ``validate_fixed_path`` checks
 the lexical rules first and only then asks ``PathFacts`` about the disk, so a
 refused path is never looked at.
+
+Rule 8 (trusted parent directories) closes the mount-target race. Root
+checks the target by path and ``mount(8)`` follows a symlink at the leaf, so
+no one but root may be able to change a directory above the target between
+the check and the mount.
 """
 
 import posixpath
@@ -19,6 +24,7 @@ import re
 import unicodedata
 from collections.abc import Callable, Iterable
 from enum import StrEnum
+from itertools import accumulate
 from typing import ClassVar, Final, Protocol
 
 from steamos_mounter.blockdev import validate_kname
@@ -30,6 +36,9 @@ REGISTRY_NAME_MAX: Final = 64
 FIXED_PATH_MAX_BYTES: Final = 255
 LAST_SUFFIX: Final = 99
 NO_FREE_NAME: Final = "no_free_name"
+UNTRUSTED_PARENT: Final = (
+    "a parent directory is a symlink or writable by a non-root user"
+)
 
 # sanitize_label step 3: replaced besides surrogates and every C* category.
 _DENIED_CHARACTERS: Final = frozenset("/\\<>&;|*?\"'$`")
@@ -68,9 +77,14 @@ class PathKind(StrEnum):
 
 
 class PathFacts(Protocol):
-    """What is on disk at an absolute host path (fixed-path rules 5 and 7)."""
+    """What is on disk at an absolute host path (fixed-path rules 5, 7 and 8)."""
 
     def kind(self, path: str) -> PathKind: ...
+
+    def trusted_dir(self, path: str) -> bool:
+        """A real directory (never a symlink) owned by root, without group or
+        other write permission."""
+        ...
 
 
 # --- sanitize_label: one function per Design Doc step -------------------------
@@ -257,6 +271,20 @@ def _parent_missing(path: str, fs: PathFacts) -> bool:
     return parent_kind not in {PathKind.EMPTY_DIR, PathKind.NON_EMPTY_DIR}
 
 
+def _parents(path: str) -> list[str]:
+    """``/`` and every directory down to the parent of ``path``, in order."""
+    return list(accumulate(_components(path)[:-1], posixpath.join, initial="/"))
+
+
+def has_trusted_parents(path: str, fs: PathFacts) -> bool:
+    """Rule 8: every directory from ``/`` through the parent of ``path`` is trusted.
+
+    The leaf itself is rule 5's business. ``path`` must be absolute and
+    normalized.
+    """
+    return all(fs.trusted_dir(directory) for directory in _parents(path))
+
+
 def validate_fixed_path(
     path: str, *, mount_base: str, other_paths: Iterable[str], fs: PathFacts
 ) -> None:
@@ -273,5 +301,7 @@ def validate_fixed_path(
         reason = "path overlaps another registered path or mount"
     if reason is None and _parent_missing(path, fs):
         reason = "parent directory does not exist"
+    if reason is None and not has_trusted_parents(path, fs):
+        reason = UNTRUSTED_PARENT
     if reason is not None:
         raise _refuse(reason, path)

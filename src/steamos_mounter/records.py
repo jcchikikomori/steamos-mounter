@@ -55,6 +55,10 @@ RECORD_MODE: Final = 0o644
 UNREADABLE: Final = "unreadable"
 TIMESTAMP_FORMAT: Final = "%Y-%m-%dT%H:%M:%SZ"
 UNTRUSTED_TREE: Final = "the runtime state directory cannot be trusted: run doctor"
+# mount.status of a mount this tool made, or is making after the DD-10 write-ahead.
+MOUNT_PENDING: Final = "pending"
+MOUNT_MOUNTED: Final = "mounted"
+OWN_MOUNT_STATUSES: Final = frozenset({MOUNT_PENDING, MOUNT_MOUNTED})
 
 _DIR_OPEN_FLAGS: Final = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 # O_NONBLOCK: a FIFO planted in place of a record cannot hang the reader.
@@ -284,6 +288,15 @@ def load_record(
     if record.kind is not InstanceKind(kind) or record.key != key.lower():
         return _unreadable(path, "kind or key differs from the file name")
     return record
+
+
+def own_mount_target(record: Record | None) -> str | None:
+    """The target the record says this tool mounted or is mounting, else None."""
+    mount = record.mount if record is not None else None
+    if not mount or mount.get("status") not in OWN_MOUNT_STATUSES:
+        return None
+    target = mount.get("target")
+    return target if isinstance(target, str) else None
 
 
 def update_record(

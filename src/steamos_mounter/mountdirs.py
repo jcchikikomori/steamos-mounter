@@ -7,7 +7,10 @@ Split out of ``mounter`` to keep it under 500 lines; ``mounter`` re-exports
   the Deck: ``/run/media`` root 0755, the base root 0750 plus
   ``setfacl -m u:<uid>:r-x``. A present base is never changed.
 - The tool creates only the leaf directory (root 0755), never a parent, and
-  checks the target again right before every mount.
+  checks the target again right before every mount, fixed-path rule 8
+  included: every directory above the target is a real directory owned by
+  the trusted uid (root on the Deck) without group or other write, so no
+  other user can swap the leaf for a symlink before ``mount(8)`` follows it.
 """
 
 import logging
@@ -17,8 +20,14 @@ import stat
 import unicodedata
 from typing import TYPE_CHECKING, Final
 
+from steamos_mounter.atomicfile import check_owner_mode
 from steamos_mounter.errors import MounterError, RefusedError, ToolError
-from steamos_mounter.naming import PathKind, validate_fixed_path
+from steamos_mounter.naming import (
+    UNTRUSTED_PARENT,
+    PathKind,
+    has_trusted_parents,
+    validate_fixed_path,
+)
 from steamos_mounter.platforms.base import HostPaths
 from steamos_mounter.runner import Command
 
@@ -31,6 +40,10 @@ MOUNT_BASE_MODE: Final = 0o750
 LEAF_MODE: Final = 0o755
 MOUNT_BASE_FAILED: Final = "cannot set up the mount base"
 LEAF_FAILED: Final = "cannot create the mount directory"
+# Rule 8: a trusted directory has neither group nor other write permission.
+# With an ACL the group bits show the ACL mask, so a named-user write entry
+# shows up here too.
+UNTRUSTED_WRITE_BITS: Final = stat.S_IWGRP | stat.S_IWOTH
 _NO_FOLLOW_DIR: Final = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _DIRECTORIES: Final = frozenset({PathKind.EMPTY_DIR, PathKind.NON_EMPTY_DIR})
 
@@ -83,10 +96,15 @@ def _make_dir(paths: HostPaths, absolute: str, mode: int) -> bool:
 
 
 class HostPathFacts:
-    """``naming.PathFacts`` on the host tree; a symlink is never a directory."""
+    """``naming.PathFacts`` on the host tree; a symlink is never a directory.
 
-    def __init__(self, paths: HostPaths) -> None:
+    ``trusted_uid`` is the owner a trusted directory must have: the
+    platform's ``trusted_uid`` (root, or the test user under ``tmp_path``).
+    """
+
+    def __init__(self, paths: HostPaths, *, trusted_uid: int) -> None:
         self._paths = paths
+        self._trusted_uid = trusted_uid
 
     def kind(self, path: str) -> PathKind:
         host = self._paths.p(path)
@@ -99,6 +117,15 @@ class HostPathFacts:
         with os.scandir(host) as entries:
             return PathKind.NON_EMPTY_DIR if any(entries) else PathKind.EMPTY_DIR
 
+    def trusted_dir(self, path: str) -> bool:
+        problem = check_owner_mode(
+            self._paths.p(path),
+            uid=self._trusted_uid,
+            forbid=UNTRUSTED_WRITE_BITS,
+            kind="dir",
+        )
+        return problem is None
+
 
 def prepare_target(ctx: "Context", target: str) -> bool:
     """Check ``target`` again right before mounting; create only the leaf.
@@ -106,12 +133,12 @@ def prepare_target(ctx: "Context", target: str) -> bool:
     A direct child of the mount base is an auto or registered name (auto
     names keep printable Unicode, which the fixed-path character rule
     refuses); any other path gets every fixed-path rule. Either way it must be
-    missing or an empty directory under a real parent directory. Returns True
-    when this call created the leaf. Raises ``RefusedError`` or
-    ``MounterError``.
+    missing or an empty directory under trusted parent directories (rules 5,
+    7 and 8). Returns True when this call created the leaf. Raises
+    ``RefusedError`` or ``MounterError``.
     """
     base = ctx.platform.mount_base
-    facts = HostPathFacts(ctx.paths)
+    facts = HostPathFacts(ctx.paths, trusted_uid=ctx.platform.trusted_uid)
     if posixpath.dirname(target) == base:
         _check_base_child(target, facts)
     else:
@@ -123,7 +150,7 @@ def prepare_target(ctx: "Context", target: str) -> bool:
 
 
 def _check_base_child(target: str, facts: HostPathFacts) -> None:
-    """The fixed-path rules that also hold for an auto name (rules 1, 5 and 7)."""
+    """The fixed-path rules that also hold for an auto name (rules 1, 5, 7, 8)."""
     kind = facts.kind(target)
     reason = None
     if any(unicodedata.category(char) == "Cc" for char in target):
@@ -138,6 +165,8 @@ def _check_base_child(target: str, facts: HostPathFacts) -> None:
         reason = "path exists and is not a directory"
     elif facts.kind(posixpath.dirname(target)) not in _DIRECTORIES:
         reason = "parent directory does not exist"
+    elif not has_trusted_parents(target, facts):
+        reason = UNTRUSTED_PARENT
     if reason is not None:
         raise RefusedError(reason, detail=f"mount target {target!r} refused: {reason}")
 

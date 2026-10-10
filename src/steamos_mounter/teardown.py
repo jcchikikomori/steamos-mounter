@@ -45,6 +45,7 @@ from steamos_mounter.locks import VOLUME_KEY
 from steamos_mounter.model import InstanceKind, VolumeState
 from steamos_mounter.mounter import UnmountResult
 from steamos_mounter.records import (
+    OWN_MOUNT_STATUSES,
     RECORD_SUFFIX,
     RECORDS_DIR,
     Record,
@@ -72,7 +73,7 @@ if TYPE_CHECKING:
 LOCK_WAIT: Final = 10.0  # TimeoutStopSec=60 minus 20 + 10 + 10 + 10 s of tools
 REASON_RECORD_UNREADABLE: Final = "record_unreadable"
 UNMOUNTED: Final = "unmounted"
-OWN_STATUSES: Final = frozenset({"pending", "mounted"})
+OWN_STATUSES: Final = OWN_MOUNT_STATUSES
 GONE_RESULTS: Final = frozenset({"unmounted", "lazy", "absent"})
 DONE_CLOSES: Final = frozenset({"closed", "absent"})
 _SYS_DEV_BLOCK: Final = "/sys/dev/block"

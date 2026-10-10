@@ -424,6 +424,10 @@ def test_udisks_at_fixed_path_is_mounted_elsewhere(
         so a stop or ``unmount`` has nothing of the tool's to unmount; the
         second pass does not adopt the mount either
       - one NOTICE per pass with SM_STATE=MountedElsewhere, no notification
+      - ``list`` is transparent about it (owner decision 2026-10-10):
+        state.compute_views(...) over the same inputs shows PERSONAL as
+        MountedElsewhere at PERSONAL_PATH, words "mounted elsewhere", with the
+        MountedElsewhere next step, never "mounted read-write"
     """
     caplog.set_level(logging.DEBUG)
     given_personal_unlocked_in_dolphin(ctx, tmp_path, host_tree)
@@ -450,3 +454,13 @@ def test_udisks_at_fixed_path_is_mounted_elsewhere(
     assert (record["state"], record["mount"]) == ("MountedElsewhere", None)
     assert record["next_step"] == ELSEWHERE_NEXT_STEP
     assert len(outcome_notices(caplog, "MountedElsewhere")) == 2
+    views = state.compute_views(
+        ctx, config.load(ctx), blockdev.read_tree(ctx), mounts.table(ctx)
+    )
+    [personal] = [view for view in views if view.name == "PERSONAL"]
+    assert (personal.state, personal.path) == (
+        VolumeState.MOUNTED_ELSEWHERE,
+        PERSONAL_PATH,
+    )
+    assert state.words(personal.state, personal.reason) == "mounted elsewhere"
+    assert personal.next_step == ELSEWHERE_NEXT_STEP

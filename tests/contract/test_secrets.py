@@ -515,6 +515,7 @@ def test_stored_key_unlock_never_reads_or_shows_the_key(
     ]
     assert outcome.state is expected
     assert len(starts) == key_unit_starts  # "rejects" reached the key unit start
+    assert all(argv[-1].startswith("steamos-mounter-key@") for argv in starts)
     assert not key_was_opened
     assert not in_calls
     assert not in_logs

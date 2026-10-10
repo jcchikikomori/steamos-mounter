@@ -17,9 +17,14 @@ Split out of ``reconcile`` by step, like ``reconcile_mount``.
    session check decides: ``DESKTOP`` starts the key unit with
    ``systemctl start --no-block`` once the record is written, and no
    notification is sent (the dialog replaces it); otherwise the reason is
-   ``no_session`` or ``session_not_sure`` and nothing is sent. A reload,
-   delegated or not, never starts the key unit and keeps the stored-key
-   reason.
+   ``no_session`` or ``session_not_sure`` and nothing is sent. The check
+   shares the notify path's budget (``NOTIFY_AFTER_DEADLINE`` past the
+   handler deadline), so the session check never runs past that budget; a
+   check the budget cuts short is ``session_not_sure``. ``cryptsetup open``
+   itself is not capped by the handler deadline, so a full lock wait plus a
+   slow open can still reach ``TimeoutStartSec`` (accepted residual risk).
+   A reload, delegated or not, never starts the key unit and keeps the
+   stored-key reason.
 3. ``BAD_PERMISSIONS``: ``NeedsKey`` ``key_permissions``, no dialog, and the
    DD-19 notification.
 4. A cryptsetup failure other than a rejected key (busy, timeout, missing
@@ -293,7 +298,8 @@ def _needs_key(step: _Unlock, cause: str) -> _Decision:
     if step.trigger not in DIALOG_TRIGGERS:
         decided = _needs_key_report(cause, f"{sentence}.")
         return _Decision(decided)
-    verdict = session.check(step.ctx, need_display=False).verdict
+    deadline = step.run.deadline + report.NOTIFY_AFTER_DEADLINE
+    verdict = session.check(step.ctx, need_display=False, deadline=deadline).verdict
     if verdict is session.Verdict.DESKTOP:
         return _Decision(_needs_key_report(cause, f"{sentence}."), start_key_unit=True)
     reason = REASON_NO_SESSION if verdict is session.Verdict.NONE else REASON_NOT_SURE
