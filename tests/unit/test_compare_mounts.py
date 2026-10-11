@@ -4,9 +4,12 @@ Design Doc: docs/design/steamos-mounter-design.md (section "Output Comparison"
 and "Mount Options per Driver"). The script is a dev-only tool outside the
 coverage source, so it is loaded by path. Its inputs are a ``findmnt -J``
 capture and a two-line ``stat -c '%U %G %a'`` capture (mount root, then one
-file written by ``deck``) for each side; the findmnt inputs are the synthetic
-old/new pair, and the stat lines are built here. The expected-field table
-itself lives in the script; these tests pin the verdict per field.
+file written by ``deck``) for each side. Two baselines are used: the real
+Stage A step 3 captures from the Deck (``compare-stage-a-*`` under
+``fixtures/deck/``), and the synthetic old/new findmnt pair with stat lines
+built here, which the mutation tests edit one field at a time. The
+expected-field table itself lives in the script; these tests pin the verdict
+per field.
 """
 
 import importlib.util
@@ -25,8 +28,16 @@ OLD_FINDMNT = "compare-old-ntfs.json"
 NEW_FINDMNT = "compare-new-fuseblk.json"
 # ntfs-3g without uid/gid/umask: everything root-owned, 0777.
 OLD_STAT = "root root 777\nroot root 777\n"
-# ntfs-3g with uid=1000,gid=1000,umask=0022.
+# ntfs-3g with uid=1000,gid=1000,umask=0022, but files 644 (a stricter file mode
+# than the 755 ntfs-3g really gives, which the tool also accepts).
 NEW_STAT = "deck deck 755\ndeck deck 644\n"
+
+# Real Stage A step 3 captures: `sudo mount -t ntfs` at /run/smt-old versus the
+# registered instance at /run/media/deck/SCRATCH, same dirty.img loop device.
+REAL_OLD_FINDMNT = "compare-stage-a-old-findmnt.json"
+REAL_OLD_STAT = "compare-stage-a-old-stat.txt"
+REAL_NEW_FINDMNT = "compare-stage-a-new-findmnt.json"
+REAL_NEW_STAT = "compare-stage-a-new-stat.txt"
 
 EXIT_OK = 0
 EXIT_UNEXPECTED = 1
@@ -66,6 +77,21 @@ def compare_mounts() -> ModuleType:
 
 def findmnt(name: str) -> dict:
     return json.loads(load_fixture(name))
+
+
+def stat(name: str) -> str:
+    return load_fixture(name).decode("utf-8")
+
+
+def real_inputs(tmp_path: Path, **overrides) -> list[str]:
+    """The four argv paths for the real Stage A pair, with optional overrides."""
+    real = {
+        "old_findmnt": findmnt(REAL_OLD_FINDMNT),
+        "old_stat": stat(REAL_OLD_STAT),
+        "new_findmnt": findmnt(REAL_NEW_FINDMNT),
+        "new_stat": stat(REAL_NEW_STAT),
+    }
+    return write_inputs(tmp_path, **(real | overrides))
 
 
 def set_field(capture: dict, key: str, value: str) -> dict:
@@ -159,6 +185,147 @@ def test_same_registered_path_on_both_sides_is_equal(compare_mounts, capsys, tmp
 
     assert code == EXIT_OK
     assert verdicts(out)[TARGET] == "equal"
+
+
+# --- the real Stage A pair --------------------------------------------------
+
+
+def test_real_stage_a_pair_gives_no_unexpected(compare_mounts, capsys, tmp_path):
+    code, out, err = run(compare_mounts, capsys, real_inputs(tmp_path))
+
+    assert code == EXIT_OK
+    assert err == ""
+    assert "UNEXPECTED" not in out
+    assert verdicts(out) == {
+        FSTYPE: "equal",
+        READ_WRITE: "equal",
+        VFS_FLAGS: "equal",
+        FILE_OWNER: "intended",
+        FILE_MODE: "intended",
+        DECK_CREATES: "equal",
+        TARGET: "intended",
+    }
+
+
+def test_real_stage_a_pair_lines_show_the_observed_values(
+    compare_mounts, capsys, tmp_path
+):
+    _, out, _ = run(compare_mounts, capsys, real_inputs(tmp_path))
+
+    lines = out.splitlines()
+    assert lines[2] == (
+        "equal      vfs-options contains nosuid,nodev: old=nosuid,nodev"
+        " new=nosuid,nodev"
+    )
+    assert lines[4] == "intended   file mode: old=777 777 new=755 755"
+
+
+def test_old_capture_with_nosuid_nodev_is_accepted(compare_mounts, capsys, tmp_path):
+    old = set_field(findmnt(OLD_FINDMNT), "vfs-options", "rw,nosuid,nodev,relatime")
+
+    code, out, _ = run(compare_mounts, capsys, write_inputs(tmp_path, old_findmnt=old))
+
+    assert code == EXIT_OK
+    assert verdicts(out)[VFS_FLAGS] == "equal"
+
+
+@pytest.mark.parametrize(
+    "vfs_options",
+    [
+        "rw,nosuid,nodev,noexec,relatime",
+        "rw,noexec,relatime",
+        "rw,nosuid,nodev,relatime,sync",
+    ],
+)
+def test_old_capture_with_other_flags_is_unexpected(
+    compare_mounts, capsys, tmp_path, vfs_options
+):
+    old = set_field(findmnt(REAL_OLD_FINDMNT), "vfs-options", vfs_options)
+
+    code, out, _ = run(compare_mounts, capsys, real_inputs(tmp_path, old_findmnt=old))
+
+    assert code == EXIT_UNEXPECTED
+    assert verdicts(out)[VFS_FLAGS] == "UNEXPECTED"
+
+
+@pytest.mark.parametrize(
+    "vfs_options",
+    [
+        "rw,nosuid,nodev,noexec,relatime",
+        "rw,nosuid,nodev,relatime,sync",
+        "rw,nosuid,relatime",
+        "rw,nodev,relatime",
+    ],
+)
+def test_real_new_capture_with_wrong_flags_is_unexpected(
+    compare_mounts, capsys, tmp_path, vfs_options
+):
+    new = set_field(findmnt(REAL_NEW_FINDMNT), "vfs-options", vfs_options)
+
+    code, out, _ = run(compare_mounts, capsys, real_inputs(tmp_path, new_findmnt=new))
+
+    assert code == EXIT_UNEXPECTED
+    assert verdicts(out)[VFS_FLAGS] == "UNEXPECTED"
+
+
+def test_unexpected_flags_line_names_both_accepted_old_sets(
+    compare_mounts, capsys, tmp_path
+):
+    old = set_field(findmnt(REAL_OLD_FINDMNT), "vfs-options", "rw,noexec,relatime")
+
+    _, out, _ = run(compare_mounts, capsys, real_inputs(tmp_path, old_findmnt=old))
+
+    assert out.splitlines()[2] == (
+        "UNEXPECTED vfs-options contains nosuid,nodev: old=noexec new=nosuid,nodev"
+        " (expected old=none or nosuid,nodev new=nosuid,nodev)"
+    )
+
+
+@pytest.mark.parametrize("file_mode", ["755", "644", "700", "600"])
+def test_new_file_mode_755_or_stricter_is_accepted(
+    compare_mounts, capsys, tmp_path, file_mode
+):
+    new_stat = f"deck deck 755\ndeck deck {file_mode}\n"
+
+    code, out, _ = run(compare_mounts, capsys, real_inputs(tmp_path, new_stat=new_stat))
+
+    assert code == EXIT_OK
+    assert verdicts(out)[FILE_MODE] == "intended"
+
+
+@pytest.mark.parametrize(
+    "new_stat",
+    [
+        "deck deck 755\ndeck deck 775\n",
+        "deck deck 755\ndeck deck 777\n",
+        "deck deck 755\ndeck deck 757\n",
+        "deck deck 755\ndeck deck 765\n",
+        "deck deck 755\ndeck deck 4755\n",
+        "deck deck 775\ndeck deck 755\n",
+        "deck deck 757\ndeck deck 755\n",
+        "deck deck 700\ndeck deck 755\n",
+    ],
+)
+def test_new_mode_with_extra_bits_is_unexpected(
+    compare_mounts, capsys, tmp_path, new_stat
+):
+    code, out, _ = run(compare_mounts, capsys, real_inputs(tmp_path, new_stat=new_stat))
+
+    assert code == EXIT_UNEXPECTED
+    assert verdicts(out)[FILE_MODE] == "UNEXPECTED"
+
+
+def test_unexpected_mode_line_names_the_file_mode_ceiling(
+    compare_mounts, capsys, tmp_path
+):
+    new_stat = "deck deck 755\ndeck deck 775\n"
+
+    _, out, _ = run(compare_mounts, capsys, real_inputs(tmp_path, new_stat=new_stat))
+
+    assert out.splitlines()[4] == (
+        "UNEXPECTED file mode: old=777 777 new=755 775"
+        " (expected old=777 777 new=755 755-or-stricter)"
+    )
 
 
 # --- mutated new captures ---------------------------------------------------

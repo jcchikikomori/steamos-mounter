@@ -31,7 +31,7 @@ INDEX = DECK / "_capture-index.tsv"
 
 FIXTURE_NOTE = "fixture"
 EVIDENCE_NOTE = "evidence"
-EXPECTED_FIXTURE_ROWS = 57
+EXPECTED_FIXTURE_ROWS = 61
 EXPECTED_EVIDENCE_ROWS = 5
 NONZERO_RC_CAPTURES = {
     "findmnt-sdb5-not-mounted.json": 1,
@@ -69,7 +69,7 @@ def test_index_has_expected_columns():
     assert header == ["file", "rc", "streams_note"]
 
 
-def test_index_lists_57_fixtures_and_5_evidence_captures():
+def test_index_lists_61_fixtures_and_5_evidence_captures():
     notes = [row["streams_note"] for row in read_index()]
 
     assert notes.count(FIXTURE_NOTE) == EXPECTED_FIXTURE_ROWS

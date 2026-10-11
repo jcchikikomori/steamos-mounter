@@ -17,6 +17,16 @@ Prints one line per field of the Design Doc table (section "Output
 Comparison"), each marked ``equal``, ``intended`` or ``UNEXPECTED``; an
 UNEXPECTED line also names what was expected.
 
+Two expectations follow the real Stage A captures rather than the table's
+first wording:
+
+- the old side may carry ``nosuid,nodev`` (FUSE adds them to a root
+  ``mount.ntfs-3g`` mount), so with them on both sides the row reads ``equal``;
+  any other non-neutral flag on either side, ``noexec`` included, is UNEXPECTED;
+- on the new side ntfs-3g's ``umask=0022`` gives files ``755`` like dirs (no
+  fmask), so the mount root must be ``755`` and the file ``755`` or stricter
+  (no permission bit beyond ``755``, so never group or other write).
+
 Exit codes: 0 every field equal or intended, 1 any field UNEXPECTED, 2 usage or
 an unreadable capture (nothing compared).
 """
@@ -56,6 +66,8 @@ NEUTRAL_VFS_OPTIONS = frozenset(
 OWNER_WRITE = 0o200
 GROUP_WRITE = 0o020
 OTHER_WRITE = 0o002
+NEW_ROOT_MODE = "755"
+NEW_FILE_MODE_CEILING = "755"
 
 
 class CaptureError(Exception):
@@ -104,6 +116,25 @@ def same_options(*options: str) -> Expect:
 
 def _option_set(observed: str) -> frozenset[str]:
     return frozenset() if observed == NONE else frozenset(observed.split(","))
+
+
+def either(*choices: Expect) -> Expect:
+    """Accepts what any of ``choices`` accepts."""
+    text = " or ".join(choice.text for choice in choices)
+    return Expect(
+        text, lambda observed: any(choice.accepts(observed) for choice in choices)
+    )
+
+
+def root_and_file_within(root: str, file_ceiling: str) -> Expect:
+    """Root mode exactly ``root``; file mode with no bit beyond ``file_ceiling``."""
+    extra_bits = ~int(file_ceiling, 8)
+
+    def accepts(observed: str) -> bool:
+        root_mode, _, file_mode = observed.partition(" ")
+        return root_mode == root and not int(file_mode, 8) & extra_bits
+
+    return Expect(f"{root} {file_ceiling}-or-stricter", accepts)
 
 
 def _is_base_child(path: str) -> bool:
@@ -182,16 +213,17 @@ class Field:
 
 # Mirrors "Output Comparison" in docs/design/steamos-mounter-design.md, with the
 # new side's options and ownership from "Mount Options per Driver" (ntfs-3g rw:
-# nosuid,nodev,uid=1000,gid=1000,umask=0022; never noexec). The status column is
-# derived: both sides as expected and identical -> equal, as expected but
-# different -> intended, anything else -> UNEXPECTED.
+# nosuid,nodev,uid=1000,gid=1000,umask=0022; never noexec), corrected by the real
+# Stage A captures (old side may be nosuid,nodev; new files 755, see the module
+# docstring). The status column is derived: both sides as expected and identical
+# -> equal, as expected but different -> intended, anything else -> UNEXPECTED.
 FIELDS: tuple[Field, ...] = (
     Field("fstype", read_fstype, exactly("fuseblk"), exactly("fuseblk")),
     Field("read-write", read_write, exactly(YES), exactly(YES)),
     Field(
         "vfs-options contains nosuid,nodev",
         read_vfs_flags,
-        same_options(),
+        either(same_options(), same_options("nosuid", "nodev")),
         same_options("nosuid", "nodev"),
     ),
     Field(
@@ -200,7 +232,12 @@ FIELDS: tuple[Field, ...] = (
         exactly("root:root root:root"),
         exactly("deck:deck deck:deck"),
     ),
-    Field("file mode", read_mode, exactly("777 777"), exactly("755 644")),
+    Field(
+        "file mode",
+        read_mode,
+        exactly("777 777"),
+        root_and_file_within(NEW_ROOT_MODE, NEW_FILE_MODE_CEILING),
+    ),
     Field("deck can create a file", read_deck_creates, exactly(YES), exactly(YES)),
     Field("target", read_target, ANY_TARGET, BASE_CHILD),
 )

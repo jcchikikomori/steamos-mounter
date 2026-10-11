@@ -61,3 +61,7 @@ udev-run-90-holo-partsets-all.rules.txt	0	fixture
 loginctl-list-sessions.json	0	fixture
 systemctl-show-device-aliases.txt	0	fixture
 loginctl-session-3-properties.txt	0	fixture
+compare-stage-a-old-findmnt.json	0	fixture
+compare-stage-a-old-stat.txt	0	fixture
+compare-stage-a-new-findmnt.json	0	fixture
+compare-stage-a-new-stat.txt	0	fixture

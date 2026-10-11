@@ -1,0 +1,11 @@
+{
+   "filesystems": [
+      {
+         "target": "/run/smt-old",
+         "source": "/dev/loop0",
+         "fstype": "fuseblk",
+         "vfs-options": "rw,nosuid,nodev,relatime",
+         "fs-options": "rw,user_id=0,group_id=0,allow_other,blksize=4096"
+      }
+   ]
+}
