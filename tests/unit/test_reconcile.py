@@ -436,6 +436,7 @@ def test_locked_unregistered_container_records_locked(
     known_os_set(tmp_path)
     host_tree.add_sysfs_facts(facts_text(drop=("/sys/class/block/sdb1/holders",)))
     script_lsblk(fake_runner, "lsblk-tree-personal-locked.json")
+    script_no_session(fake_runner)
 
     outcome = reconcile.run(ctx, InstanceKind.AUTO, SDB1_SYSPATH, Trigger.START)
 
@@ -453,6 +454,187 @@ def test_locked_unregistered_container_records_locked(
         "syspath": SDB1_SYSPATH,
     }
     assert record["mount"] is None
+    # Owner decision 2026-10-11: the plug-in asks logind before notifying.
+    assert {argv[0] for argv in fake_runner.argvs} == {LSBLK_ARGV[0], LOGINCTL}
+    assert argvs_of(fake_runner, SYSTEMD_RUN) == []
+
+
+# --- locked encrypted partitions: the plug-in notification (owner decision 2026-10-11)
+
+LUKS_UUID = "5b0c1d2e-3f40-4a51-8b62-7c83d94ea5f6"
+LOCKED_BODY = "It is encrypted and locked. Unlock it in Dolphin."
+PERSONAL_LABEL = "PAT4T4SHUAWEI PERSONAL 4_3_2024"
+
+
+@pytest.fixture
+def plugged_locked(ctx, host_tree, tmp_path):
+    """sdb1 plugged in locked (no holder); MEDIABOX is the only registered volume."""
+    runtime_dirs(ctx)
+    write_registry(tmp_path, MEDIABOX_ONLY)
+    known_os_set(tmp_path)
+    host_tree.add_sysfs_facts(facts_text(drop=("/sys/class/block/sdb1/holders",)))
+    return tmp_path
+
+
+def notification(fake_runner) -> tuple[str, str, str]:
+    """(urgency, summary, body) of the one notification sent."""
+    [argv] = argvs_of(fake_runner, SYSTEMD_RUN)
+    return argv[argv.index("-u") + 1], argv[-2], argv[-1]
+
+
+def without_label(document) -> None:
+    [sdb] = [node for node in document["blockdevices"] if node["kname"] == "sdb"]
+    [sdb1] = [node for node in sdb["children"] if node["kname"] == "sdb1"]
+    sdb1["label"] = None
+
+
+def test_locked_bitlocker_plug_in_notifies_in_desktop_mode(
+    ctx, plugged_locked, fake_runner, caplog
+):
+    script_lsblk(fake_runner, "lsblk-tree-personal-locked.json")
+    script_desktop_session(fake_runner)
+    script_notify(fake_runner)
+
+    outcome = reconcile.run(ctx, InstanceKind.AUTO, SDB1_SYSPATH, Trigger.START)
+
+    assert (outcome.route.action, outcome.state) == (
+        Action.SKIP_LOCKED,
+        VolumeState.LOCKED,
+    )
+    assert notification(fake_runner) == (
+        "normal",
+        f"{PERSONAL_LABEL} is locked",
+        f"{LOCKED_BODY} It mounts here by itself after that.",
+    )
+    assert f"{PERSONAL_LABEL}: locked and skipped" in caplog.messages
+    assert argvs_of(fake_runner, CRYPTSETUP) == []
+    assert argvs_of(fake_runner, SYSTEMCTL) == []
+
+
+def test_locked_luks_plug_in_records_locked_and_notifies_without_a_promise(
+    ctx, plugged_locked, fake_runner, caplog
+):
+    script_lsblk(fake_runner, "lsblk-tree-luks-locked.json")
+    script_desktop_session(fake_runner)
+    script_notify(fake_runner)
+
+    outcome = reconcile.run(ctx, InstanceKind.AUTO, SDB1_SYSPATH, Trigger.START)
+
+    assert (outcome.route.action, outcome.state) == (
+        Action.SKIP_LOCKED,
+        VolumeState.LOCKED,
+    )
+    assert outcome.route.reason == "locked LUKS container"
+    record = read_record(plugged_locked, SDB1_RECORD)
+    assert (record["state"], record["name"]) == ("Locked", "TRAVEL")
+    assert record["next_step"] == "Unlock it in Dolphin."
+    assert record["mount"] is None
+    assert notification(fake_runner) == ("normal", "TRAVEL is locked", LOCKED_BODY)
+    assert "TRAVEL: locked and skipped" in caplog.messages
+    assert argvs_of(fake_runner, CRYPTSETUP) == []
+
+
+def test_locked_luks_without_a_label_is_named_by_size_and_kernel_name(
+    ctx, plugged_locked, fake_runner
+):
+    fake_runner.on(
+        LSBLK_ARGV,
+        edited_json("lsblk-tree-luks-locked.json", without_label),
+        repeat=True,
+    )
+    script_desktop_session(fake_runner)
+    script_notify(fake_runner)
+
+    reconcile.run(ctx, InstanceKind.AUTO, SDB1_SYSPATH, Trigger.START)
+
+    record = read_record(plugged_locked, SDB1_RECORD)
+    assert record["name"] == f"crypto_LUKS-{LUKS_UUID}"
+    assert notification(fake_runner) == (
+        "normal",
+        "326 GB encrypted drive (sdb1) is locked",
+        LOCKED_BODY,
+    )
+
+
+@pytest.mark.parametrize(
+    "fixture", ["lsblk-tree-personal-locked.json", "lsblk-tree-luks-locked.json"]
+)
+def test_locked_container_on_reload_is_not_notified(
+    ctx, plugged_locked, fake_runner, fixture
+):
+    script_lsblk(fake_runner, fixture)
+
+    outcome = reconcile.run(ctx, InstanceKind.AUTO, SDB1_SYSPATH, Trigger.RELOAD)
+
+    assert outcome.state is VolumeState.LOCKED
+    assert read_record(plugged_locked, SDB1_RECORD)["state"] == "Locked"
+    assert fake_runner.argvs == [LSBLK_ARGV]
+
+
+def test_locked_container_without_a_desktop_session_is_not_notified(
+    ctx, plugged_locked, fake_runner, caplog
+):
+    script_lsblk(fake_runner, "lsblk-tree-luks-locked.json")
+    script_no_session(fake_runner)
+
+    outcome = reconcile.run(ctx, InstanceKind.AUTO, SDB1_SYSPATH, Trigger.START)
+
+    assert outcome.state is VolumeState.LOCKED
+    assert len(argvs_of(fake_runner, LOGINCTL)) == 1
+    assert argvs_of(fake_runner, SYSTEMD_RUN) == []
+    assert "no Desktop Mode session: TRAVEL is not notified" in caplog.messages
+
+
+def test_locked_notification_skipped_when_no_time_is_left(
+    ctx, plugged_locked, fake_runner, fake_clock, caplog
+):
+    """The pass budget ends 80 s in; an lsblk that ate it leaves no notification."""
+
+    def slow(_command) -> None:
+        fake_clock.advance(80.0)
+
+    fake_runner.on(
+        LSBLK_ARGV,
+        Answer.from_fixture("lsblk-tree-luks-locked.json", returncode=0),
+        hook=slow,
+    )
+
+    outcome = reconcile.run(ctx, InstanceKind.AUTO, SDB1_SYSPATH, Trigger.START)
+
+    assert outcome.state is VolumeState.LOCKED
+    assert fake_runner.argvs == [LSBLK_ARGV]
+    assert any(
+        record.levelno == logging.WARNING
+        and sm_fields(record).get("SM_EVENT") == "notify"
+        for record in caplog.records
+    )
+
+
+def test_unlocked_luks_container_is_ignored_without_a_record_or_notification(
+    ctx, host_tree, tmp_path, fake_runner
+):
+    """sdb1 is LUKS and its dm-0 holder is open: the desktop mounts it."""
+
+    def luks_sdb1(document) -> None:
+        [sdb] = [node for node in document["blockdevices"] if node["kname"] == "sdb"]
+        [sdb1] = [node for node in sdb["children"] if node["kname"] == "sdb1"]
+        sdb1["fstype"] = "crypto_LUKS"
+        sdb1["uuid"] = LUKS_UUID
+
+    runtime_dirs(ctx)
+    write_registry(tmp_path, MEDIABOX_ONLY)
+    known_os_set(tmp_path)
+    host_tree.add_sysfs_facts()
+    fake_runner.on(
+        LSBLK_ARGV, edited_json("lsblk-columns-tree.json", luks_sdb1), repeat=True
+    )
+
+    outcome = reconcile.run(ctx, InstanceKind.AUTO, SDB1_SYSPATH, Trigger.START)
+
+    assert outcome.route.action is Action.IGNORE
+    assert outcome.route.reason == "unlocked LUKS container: the desktop mounts it"
+    assert outcome.state is None
+    assert not (tmp_path / SDB1_RECORD).exists()
     assert fake_runner.argvs == [LSBLK_ARGV]
 
 
@@ -1637,6 +1819,24 @@ def test_key_path_session_check_out_of_time_is_not_sure_and_starts_nothing(
         "The stored key did not work, and the Desktop Mode session could not be"
         " confirmed for the key dialog."
     )
+
+
+def test_registered_locked_bitlocker_gets_no_locked_notification(
+    ctx, deck, fake_runner, locked, trees
+):
+    """A registered container keeps its key path: the key unit, not a notice."""
+    write_key_file(deck, PERSONAL_UUID, TEST_KEY)
+    fake_runner.on(CRYPTSETUP, Answer(returncode=2))
+    script_desktop_session(fake_runner)
+    fake_runner.on(START_KEY_UNIT, Answer())
+
+    outcome = reconcile.run(
+        ctx, InstanceKind.REGISTERED, PERSONAL_DEVICE, Trigger.START
+    )
+
+    assert outcome.route.action is Action.UNLOCK_REGISTERED
+    assert argvs_of(fake_runner, SYSTEMCTL) == [START_KEY_UNIT]
+    assert argvs_of(fake_runner, SYSTEMD_RUN) == []
 
 
 def test_no_session_needs_key(ctx, deck, fake_runner, locked, trees, caplog):

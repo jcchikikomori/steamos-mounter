@@ -10,6 +10,13 @@ Design Doc "Notifications", DD-19, AC-046, AC-047 and ADR-0005 D3 item 8.
   any other ``NeedsKey`` (a started key unit's dialog replaces the
   notification; without a session there is nobody to tell), a cancel,
   ``MountedElsewhere``, ``Locked`` or a healthy state.
+- **Locked** (``locked_notice``, owner decision 2026-10-11): the one
+  exception to "never ``Locked``". A locked BitLocker or LUKS container the
+  tool does not unlock itself gets one ``normal`` notification when it is
+  plugged in; the caller decides when (trigger ``start`` only). The summary
+  names it by its sanitised label, else by size and kernel name ("32 GB
+  encrypted drive (sdc1)"); the body asks to unlock it in Dolphin, and only
+  promises the mount after that when the tool will make it (BitLocker).
 - **Text**: the summary names the volume; the body says what happened in
   plain words, then the view's next step. ``<``, ``>`` and ``&`` become
   ``_``, so Plasma's body markup cannot be injected through a name, a path or
@@ -38,10 +45,12 @@ from typing import TYPE_CHECKING, Final, Literal
 from steamos_mounter import state
 from steamos_mounter.journal import fields
 from steamos_mounter.model import VolumeState
+from steamos_mounter.naming import sanitize_label
 from steamos_mounter.runner import Command
 from steamos_mounter.session_display import user_manager_env
 
 if TYPE_CHECKING:
+    from steamos_mounter.blockdev import BlockDevice
     from steamos_mounter.context import Context
     from steamos_mounter.state import VolumeView
 
@@ -60,6 +69,13 @@ _CRITICAL: Final[Urgency] = "critical"
 URGENCIES: Final = frozenset({_NORMAL, _CRITICAL})
 _MOUNT_PROBLEM: Final = "{name} could not be mounted"
 _NEEDS_KEY: Final = "{name} needs a key"
+_LOCKED: Final = "{name} is locked"
+_LOCKED_PROBLEM: Final = "It is encrypted and locked. Unlock it in Dolphin."
+_MOUNTS_AFTER_UNLOCK: Final = "It mounts here by itself after that."
+_UNLABELLED: Final = "{size} encrypted drive ({kname})"
+# Decimal units, as drive makers print them on the box.
+_SIZE_UNITS: Final = (("TB", 10**12), ("GB", 10**9), ("MB", 10**6))
+_ONE_DECIMAL_BELOW: Final = 10
 
 # NeedsKey reasons that get a notification; every other one has a dialog
 # coming (the key unit was started) or nobody to tell.
@@ -100,6 +116,23 @@ def notice_for(view: "VolumeView", *, event: str) -> Notice | None:
         summary=_without_markup(summary.format(name=view.name)),
         body=_without_markup(body),
         urgency=urgency,
+    )
+
+
+def locked_notice(device: "BlockDevice", *, mounts_after_unlock: bool) -> Notice:
+    """The plug-in notification for a locked container the tool leaves alone.
+
+    ``mounts_after_unlock`` adds the promise that the tool mounts it once it
+    is unlocked; only say so when routing will (BitLocker, not LUKS).
+    """
+    name = sanitize_label(device.label) or _UNLABELLED.format(
+        size=_size_words(device.size), kname=device.kname
+    )
+    parts = (_LOCKED_PROBLEM, _MOUNTS_AFTER_UNLOCK if mounts_after_unlock else "")
+    return Notice(
+        summary=_without_markup(_LOCKED.format(name=name)),
+        body=_without_markup(" ".join(part for part in parts if part)),
+        urgency=_NORMAL,
     )
 
 
@@ -202,6 +235,17 @@ def _read_only_problem(view: "VolumeView") -> str:
             f" {state.UNSAFE_STATE}."
         )
     return f"Mounted read-only at {view.path}."
+
+
+def _size_words(size: int) -> str:
+    """``size`` bytes in decimal units: "32 GB", "1.5 TB", else bytes."""
+    for unit, scale in _SIZE_UNITS:
+        if size >= scale:
+            value = size / scale
+            digits = 0 if value >= _ONE_DECIMAL_BELOW else 1
+            number = f"{value:.{digits}f}".removesuffix(".0")
+            return f"{number} {unit}"
+    return f"{size} bytes"
 
 
 def _without_markup(text: str) -> str:

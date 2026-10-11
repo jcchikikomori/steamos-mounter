@@ -9,7 +9,9 @@ filter that only appends one ``SYSTEMD_WANTS`` entry. It uses only ``GOTO``,
 A small simulator runs the rule over the seven Deck property captures
 (``udevadm info`` output): the BitLocker container, the ntfs partition and the
 ntfs dm mapping get an auto instance; ext4 partitions, the internal NVMe and an
-extended partition without a filesystem do not. The simulator supports only
+extended partition without a filesystem do not. A LUKS container (LUKS1 and
+LUKS2 both report ``ID_FS_TYPE=crypto_LUKS``) gets one too, so a locked one
+can be recorded and notified (owner decision 2026-10-11). The simulator supports only
 what the rule needs: ``==``/``!=`` matches on ``ACTION``, ``SUBSYSTEM``,
 ``KERNEL`` and ``ENV{...}`` with ``|`` alternatives and shell globs, ``GOTO``,
 ``LABEL`` and ``ENV{...}+=``. Anything else is refused, so the simulator cannot
@@ -23,6 +25,7 @@ from pathlib import Path, PurePosixPath
 
 import pytest
 
+from steamos_mounter import installer_start
 from tests.helpers.fixtures import load_fixture
 
 REPO = Path(__file__).resolve().parents[2]
@@ -279,7 +282,9 @@ def test_other_kernels_and_the_wrong_case_get_nothing(devname, fstype):
     assert simulate(rule_text(), event) == []
 
 
-@pytest.mark.parametrize("fstype", ["ntfs", "exfat", "vfat", "btrfs", "BitLocker"])
+@pytest.mark.parametrize(
+    "fstype", ["ntfs", "exfat", "vfat", "btrfs", "BitLocker", "crypto_LUKS"]
+)
 def test_every_supported_type_on_a_removable_kernel_gets_an_auto_instance(fstype):
     event = Event(
         "add", {"DEVNAME": "/dev/mmcblk0p1", "SUBSYSTEM": "block", "ID_FS_TYPE": fstype}
@@ -294,3 +299,50 @@ def test_non_block_subsystem_gets_nothing():
     )
 
     assert simulate(rule_text(), event) == []
+
+
+@pytest.mark.parametrize("version", ["1", "2"])
+@pytest.mark.parametrize("devname", ["/dev/sdc1", "/dev/mmcblk0p1", "/dev/sdc"])
+def test_a_luks_container_gets_an_auto_instance(devname, version):
+    event = Event(
+        "add",
+        {
+            "DEVNAME": devname,
+            "SUBSYSTEM": "block",
+            "ID_FS_TYPE": "crypto_LUKS",
+            "ID_FS_VERSION": version,
+        },
+    )
+
+    assert simulate(rule_text(), event) == [AUTO_TEMPLATE]
+
+
+@pytest.mark.parametrize("fstype", ["crypto_luks", "LUKS", "crypto_LUKS2"])
+def test_other_spellings_of_luks_get_nothing(fstype):
+    event = Event(
+        "add", {"DEVNAME": "/dev/sdc1", "SUBSYSTEM": "block", "ID_FS_TYPE": fstype}
+    )
+
+    assert simulate(rule_text(), event) == []
+
+
+# --- the installer's start filter mirrors the rule ------------------------------------
+
+
+def _rule_values(key: str, attr: str | None) -> set[str]:
+    [token] = [
+        token
+        for token in all_tokens()
+        if (token.key, token.attr) == (key, attr) and token.op in MATCH_OPERATORS
+    ]
+    return set(token.value.split("|"))
+
+
+def test_installer_start_filter_lists_the_rules_filesystem_types():
+    assert set(installer_start.RULE_FSTYPES) == _rule_values("ENV", "ID_FS_TYPE")
+
+
+def test_installer_start_filter_lists_the_rules_kernel_names():
+    prefixes = {f"{prefix}*" for prefix in installer_start.RULE_KERNEL_PREFIXES}
+
+    assert prefixes == _rule_values("KERNEL", None)

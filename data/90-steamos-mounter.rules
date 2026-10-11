@@ -3,5 +3,5 @@
 ACTION!="add|change", GOTO="steamos_mounter_end"
 SUBSYSTEM!="block", GOTO="steamos_mounter_end"
 KERNEL!="sd*|mmcblk*|dm-*", GOTO="steamos_mounter_end"
-ENV{ID_FS_TYPE}=="ntfs|exfat|vfat|btrfs|BitLocker", ENV{SYSTEMD_WANTS}+="steamos-mounter-auto@.service"
+ENV{ID_FS_TYPE}=="ntfs|exfat|vfat|btrfs|BitLocker|crypto_LUKS", ENV{SYSTEMD_WANTS}+="steamos-mounter-auto@.service"
 LABEL="steamos_mounter_end"

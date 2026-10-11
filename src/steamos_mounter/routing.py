@@ -17,11 +17,19 @@ with a default rule that always decides.
 
 Reasons are journal words, except the three ``REFUSE_REGISTERED`` reasons,
 which are record reasons from ``state.KNOWN_REASONS``.
+
+A locked LUKS container (``crypto_LUKS``, LUKS1 and LUKS2) is skipped like a
+locked unregistered BitLocker one (owner decision 2026-10-11), so it gets a
+``Locked`` record and the plug-in notification. Nothing else of LUKS is
+handled: an unlocked container is ignored, since the desktop that unlocked it
+mounts the inner filesystem, and its ``dm-*`` mapping is not a BitLocker
+mapping.
 """
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
+from types import MappingProxyType
 from typing import Final
 
 from steamos_mounter.bitlocker import is_tool_mapping
@@ -34,6 +42,8 @@ from steamos_mounter.platforms.base import OsPartitionSet, Platform
 REGISTERED_TEMPLATE: Final = "steamos-mounter@"
 AUTO_TEMPLATE: Final = "steamos-mounter-auto@"
 BITLOCKER: Final = "BitLocker"
+LUKS: Final = "crypto_LUKS"
+ENCRYPTED_FSTYPES: Final = frozenset({BITLOCKER, LUKS})
 EXT4: Final = "ext4"
 CRYPT_TYPE: Final = "crypt"
 LOOP_TYPE: Final = "loop"
@@ -62,6 +72,8 @@ UNSUPPORTED_TYPE: Final = "unsupported filesystem type"
 LOOP_DEVICE: Final = "loop device: registration only"
 INTERNAL_DISK: Final = "internal disk"
 LOCKED: Final = "locked BitLocker container"
+LOCKED_LUKS: Final = "locked LUKS container"
+UNLOCKED_LUKS: Final = "unlocked LUKS container: the desktop mounts it"
 FOREIGN_UNLOCK: Final = "unlocked by someone else"
 AUTO_VOLUME: Final = "unregistered removable volume"
 MAPPING_REGISTERED: Final = "unlocked mapping: register its container"
@@ -69,6 +81,9 @@ STALE_LINK: Final = "stale link"
 REGISTERED_VOLUME: Final = "registered volume"
 REGISTERED_UNLOCKED: Final = "registered BitLocker volume, already unlocked"
 REGISTERED_LOCKED: Final = "registered BitLocker volume, locked"
+_LOCKED_REASONS: Final[Mapping[str, str]] = MappingProxyType(
+    {BITLOCKER: LOCKED, LUKS: LOCKED_LUKS}
+)
 
 
 class Action(StrEnum):
@@ -311,7 +326,7 @@ def _ignore_unsupported_type(case: _Case) -> Route | None:
         return _route(case, Action.IGNORE, NO_FILESYSTEM)
     if fstype == EXT4:
         return _route(case, Action.IGNORE, EXT4_WORDS)
-    if fstype not in case.inp.platform.auto_fstypes | {BITLOCKER}:
+    if fstype not in case.inp.platform.auto_fstypes | ENCRYPTED_FSTYPES:
         return _route(case, Action.IGNORE, UNSUPPORTED_TYPE)
     return None
 
@@ -335,8 +350,15 @@ def _inner_name(case: _Case) -> str | None:
 
 
 def _skip_locked(case: _Case) -> Route | None:
-    if case.device.fstype == BITLOCKER and case.mapping is None:
-        return _route(case, Action.SKIP_LOCKED, LOCKED)
+    reason = _LOCKED_REASONS.get(case.device.fstype or "")
+    if reason is not None and case.mapping is None:
+        return _route(case, Action.SKIP_LOCKED, reason)
+    return None
+
+
+def _ignore_unlocked_luks(case: _Case) -> Route | None:
+    if case.device.fstype == LUKS:
+        return _route(case, Action.IGNORE, UNLOCKED_LUKS)
     return None
 
 
@@ -434,6 +456,7 @@ AUTO_RULES: Final[tuple[Rule, ...]] = (
     _ignore_unsupported_type,
     _ignore_not_removable,
     _skip_locked,
+    _ignore_unlocked_luks,
     _auto_mount_inner,
 )
 REGISTERED_RULES: Final[tuple[Rule, ...]] = (

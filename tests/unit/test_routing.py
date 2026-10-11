@@ -4,7 +4,8 @@ Design Doc "Device Classification and Routing" (the order of the checks is
 the order of the rules), "Data Contracts > routing.route" (the three
 invariants), DD-02 (unknown OS set fails closed), DD-07 (``fstype_mismatch``),
 DD-16 (loop devices never auto-mount) and ADR-0002 D3/D4; PRD Won't list
-(other encryption formats and filesystems are ignored).
+(other encryption formats and filesystems are ignored), except LUKS, which is
+skipped as locked like BitLocker (owner decision 2026-10-11).
 
 Trees are built with ``lsblk_device`` and parsed by the real
 ``parse_lsblk_json``; registries are TOML text parsed by the real
@@ -257,12 +258,6 @@ AUTO_EXCLUSIONS = {
         Action.YIELD,
         "registered: the registered instance owns it",
     ),
-    "unsupported-crypto_LUKS": (
-        tree_of([stick("crypto_LUKS")]),
-        EMPTY_REGISTRY,
-        Action.IGNORE,
-        "unsupported filesystem type",
-    ),
     "unsupported-xfs": (
         tree_of([stick("xfs")]),
         EMPTY_REGISTRY,
@@ -456,6 +451,65 @@ def test_non_mapping_holder_leaves_the_container_locked():
     )
 
     assert found.action is Action.SKIP_LOCKED
+
+
+def luks_stick(*, unlocked: bool, hotplug: bool = True) -> dict[str, Any]:
+    return stick(
+        "crypto_LUKS",
+        uuid=CONTAINER_UUID,
+        label="TRAVEL",
+        hotplug=hotplug,
+        children=[mapping(fstype="ext4")] if unlocked else [],
+    )
+
+
+def test_locked_luks_container_is_skipped_like_bitlocker():
+    """Owner decision 2026-10-11: a locked LUKS container is recorded Locked."""
+    found = route(make_input("sdc1", tree_of([luks_stick(unlocked=False)])))
+
+    assert found.action is Action.SKIP_LOCKED
+    assert found.reason == "locked LUKS container"
+    assert found.device is not None
+    assert (found.device.kname, found.device.fstype) == ("sdc1", "crypto_LUKS")
+    assert (found.volume, found.inner, found.mapping_name) == (None, None, None)
+
+
+def test_unlocked_luks_container_is_ignored():
+    """The tool never mounts LUKS: the desktop that unlocked it mounts it."""
+    found = route(
+        make_input(
+            "sdc1",
+            tree_of([luks_stick(unlocked=True)]),
+            holders=("dm-1",),
+            dm_names={"dm-1": "luks-5b0c1d2e"},
+        )
+    )
+
+    assert found.action is Action.IGNORE
+    assert found.reason == "unlocked LUKS container: the desktop mounts it"
+    assert found.inner is None
+
+
+def test_luks_container_on_an_internal_disk_is_ignored():
+    found = route(
+        make_input("sdc1", tree_of([luks_stick(unlocked=False, hotplug=False)]))
+    )
+
+    assert (found.action, found.reason) == (Action.IGNORE, "internal disk")
+
+
+def test_luks_mapping_is_still_not_a_bitlocker_mapping():
+    found = route(
+        make_input(
+            "dm-1",
+            tree_of([luks_stick(unlocked=True)]),
+            slaves=("sdc1",),
+            dm_names={"dm-1": "luks-5b0c1d2e"},
+            syspaths={"sdc1": CONTAINER_SYSPATH},
+        )
+    )
+
+    assert (found.action, found.reason) == (Action.IGNORE, "not a BitLocker mapping")
 
 
 def test_foreign_unlock_of_unregistered_container_auto_mounts_inner():

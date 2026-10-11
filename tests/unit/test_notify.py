@@ -8,17 +8,26 @@ it. ``send`` runs ``notify-send`` in the ``deck`` user manager through
 ``session.check`` is the caller's job, so it is not exercised here.
 """
 
+import json
 import logging
 import re
 
 import pytest
 
 from steamos_mounter import state
+from steamos_mounter.blockdev import BlockDevice, parse_lsblk_json
 from steamos_mounter.errors import SecretHandlingError
 from steamos_mounter.model import InstanceKind, VolumeState
-from steamos_mounter.notify import Notice, notice_for, out_of_time, send
+from steamos_mounter.notify import (
+    Notice,
+    locked_notice,
+    notice_for,
+    out_of_time,
+    send,
+)
 from steamos_mounter.sensitive import SecretBytes
 from steamos_mounter.state import VolumeView
+from tests.helpers.builders import lsblk_device, lsblk_tree
 from tests.helpers.fake_runner import Answer
 from tests.helpers.fixtures import load_fixture
 
@@ -365,6 +374,93 @@ def test_notice_texts_hold_no_markup_characters(volume_view, expected):
     for text in (notice.summary, notice.body):
         assert not set(text) & set("<>&")
     assert notice.summary.startswith("A_b__c ")
+
+
+# --- locked_notice: an encrypted partition the tool does not unlock ----------------
+# Owner decision 2026-10-11: one normal notification on plug-in for an
+# unregistered locked BitLocker or LUKS container. Gating on the trigger and the
+# session is the caller's job.
+
+LOCKED_BODY = "It is encrypted and locked. Unlock it in Dolphin."
+BITLOCKER_BODY = f"{LOCKED_BODY} It mounts here by itself after that."
+PERSONAL_SIZE = 325803308544  # the real PERSONAL partition (lsblk --bytes)
+
+
+def container(
+    *, fstype: str = "BitLocker", label: str | None = None, size: int = PERSONAL_SIZE
+) -> BlockDevice:
+    """A partition as ``parse_lsblk_json`` gives it."""
+    node = lsblk_device(
+        "sdc1",
+        {
+            "fstype": fstype,
+            "label": label,
+            "uuid": "658207d5-5177-4a52-a297-31643c64724d",
+            "pkname": "sdc",
+            "size": size,
+        },
+    )
+    return parse_lsblk_json(json.dumps(lsblk_tree([node])).encode()).devices["sdc1"]
+
+
+def test_locked_bitlocker_notice_names_the_sanitised_label_and_promises_the_mount():
+    """The real Stage B label: ``/`` becomes ``_`` as in the record name."""
+    notice = locked_notice(
+        container(label="PAT4T4SHUAWEI PERSONAL 4/3/2024"), mounts_after_unlock=True
+    )
+
+    assert notice == Notice(
+        summary="PAT4T4SHUAWEI PERSONAL 4_3_2024 is locked",
+        body=BITLOCKER_BODY,
+        urgency="normal",
+    )
+
+
+def test_locked_luks_notice_does_not_promise_a_mount():
+    notice = locked_notice(
+        container(fstype="crypto_LUKS", label="TRAVEL"), mounts_after_unlock=False
+    )
+
+    assert notice == Notice(
+        summary="TRAVEL is locked", body=LOCKED_BODY, urgency="normal"
+    )
+
+
+@pytest.mark.parametrize("label", [None, "", "   "])
+def test_locked_notice_without_a_label_names_size_and_kernel_name(label):
+    notice = locked_notice(
+        container(label=label, size=32_000_000_000), mounts_after_unlock=False
+    )
+
+    assert notice.summary == "32 GB encrypted drive (sdc1) is locked"
+
+
+@pytest.mark.parametrize(
+    ("size", "words"),
+    [
+        (PERSONAL_SIZE, "326 GB"),
+        (31_914_983_424, "32 GB"),
+        (9_949_999_999, "9.9 GB"),
+        (1_000_000_000, "1 GB"),
+        (1_000_204_886_016, "1 TB"),
+        (1_500_000_000_000, "1.5 TB"),
+        (999_999_999, "1000 MB"),
+        (16_777_216, "17 MB"),
+        (999_999, "999999 bytes"),
+        (0, "0 bytes"),
+    ],
+)
+def test_locked_notice_size_words_use_decimal_units(size, words):
+    notice = locked_notice(container(size=size), mounts_after_unlock=True)
+
+    assert notice.summary == f"{words} encrypted drive (sdc1) is locked"
+
+
+def test_locked_notice_holds_no_markup_characters():
+    notice = locked_notice(container(label="<b>A&B</b>"), mounts_after_unlock=True)
+
+    assert notice.summary == "b_A_B_b is locked"
+    assert not set(notice.body) & set("<>&")
 
 
 # --- Notice -------------------------------------------------------------------------

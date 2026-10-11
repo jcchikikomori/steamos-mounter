@@ -35,7 +35,9 @@ if TYPE_CHECKING:
 
 # 90-steamos-mounter.rules: KERNEL and ENV{ID_FS_TYPE}.
 RULE_KERNEL_PREFIXES: Final = ("sd", "mmcblk", "dm-")
-RULE_FSTYPES: Final = frozenset({"ntfs", "exfat", "vfat", "btrfs", "BitLocker"})
+RULE_FSTYPES: Final = frozenset(
+    {"ntfs", "exfat", "vfat", "btrfs", "BitLocker", "crypto_LUKS"}
+)
 # Routes whose instance would do nothing: no start. YIELD means registered.
 NO_START_ACTIONS: Final = frozenset({Action.IGNORE, Action.REJECT, Action.YIELD})
 STOPPED_STATES: Final = frozenset({"inactive", "failed"})

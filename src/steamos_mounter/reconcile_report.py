@@ -17,12 +17,14 @@ them end with it.
 - **Journal** (ADR-COMMON-0001): NOTICE for a decided outcome, WARNING for its
   warning, ERROR for ``MountFailed`` and ``MountTimedOut``; every entry
   carries ``SM_EVENT=reconcile`` and the volume's ``SM_*`` fields.
-- **Notify** (DD-19): only states ``notify.notice_for`` lists, and only when
-  the logind half of the session check says Desktop Mode. The session check
-  and the send share one budget that ends ``NOTIFY_AFTER_DEADLINE`` after the
-  handler deadline (80 s into the pass), so even a pass whose every command
-  hangs to its timeout ends 10 s inside ``TimeoutStartSec=90``. A notification
-  without time left is skipped with a WARNING (``SM_EVENT=notify``).
+- **Notify** (DD-19): only states ``notify.notice_for`` lists (plus the
+  locked plug-in notice ``reconcile`` sends through ``notify_on_desktop``),
+  and only when the logind half of the session check says Desktop Mode. The
+  session check and the send share one budget that ends
+  ``NOTIFY_AFTER_DEADLINE`` after the handler deadline (80 s into the pass),
+  so even a pass whose every command hangs to its timeout ends 10 s inside
+  ``TimeoutStartSec=90``. A notification without time left is skipped with a
+  WARNING (``SM_EVENT=notify``).
 - **Effective trigger** (D014): a reload whose ``cli_request`` is within 120 s
   runs as ``cli``.
 """
@@ -314,7 +316,7 @@ def finish(
     run.outcome = outcome
     journal(owner, decided, device)
     if decided.notify:
-        _notify(run.ctx, owner, decided, run.deadline + NOTIFY_AFTER_DEADLINE)
+        _notify(run, owner, decided)
     return outcome
 
 
@@ -344,7 +346,26 @@ def journal(owner: Owner, decided: Report, device: str) -> None:
         log.warning("%s", decided.warning, extra=extra)
 
 
-def _notify(ctx: "Context", owner: Owner, decided: Report, deadline: float) -> None:
+def notify_on_desktop(run: PassState, name: str, notice: notify.Notice) -> None:
+    """Send ``notice`` when logind says Desktop Mode, within the pass's budget.
+
+    The session check and the send share the budget that ends
+    ``NOTIFY_AFTER_DEADLINE`` after the handler deadline; ``name`` is the
+    volume the INFO line names when there is no Desktop Mode session.
+    """
+    ctx = run.ctx
+    deadline = run.deadline + NOTIFY_AFTER_DEADLINE
+    if notify.out_of_time(ctx, deadline):
+        return
+    found = session.check(ctx, need_display=False, deadline=deadline)
+    if found.verdict is session.Verdict.DESKTOP:
+        notify.send(ctx, notice, deadline=deadline)
+    elif not notify.out_of_time(ctx, deadline):
+        log.info("no Desktop Mode session: %s is not notified", name)
+
+
+def _notify(run: PassState, owner: Owner, decided: Report) -> None:
+    ctx = run.ctx
     view = state.VolumeView(
         name=owner.name,
         uuid=owner.uuid,
@@ -359,10 +380,5 @@ def _notify(ctx: "Context", owner: Owner, decided: Report, deadline: float) -> N
         next_step=next_step(ctx, owner, decided.state, decided.reason),
     )
     notice = notify.notice_for(view, event=EVENT)
-    if notice is None or notify.out_of_time(ctx, deadline):
-        return
-    found = session.check(ctx, need_display=False, deadline=deadline)
-    if found.verdict is session.Verdict.DESKTOP:
-        notify.send(ctx, notice, deadline=deadline)
-    elif not notify.out_of_time(ctx, deadline):
-        log.info("no Desktop Mode session: %s is not notified", owner.name)
+    if notice is not None:
+        notify_on_desktop(run, owner.name, notice)

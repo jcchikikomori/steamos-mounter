@@ -12,8 +12,11 @@ lets ``routing.route`` decide, and executes the route:
   never starts a unit or waits on a job. On ``absent`` the ``dm-*`` instance
   writes the minimal ``NotMounted`` record so ``list`` shows the volume
   (I006).
-- ``SKIP_LOCKED``: record ``Locked`` (AC-025). ``REFUSE_REGISTERED``: record
-  ``MountFailed`` with the routing reason.
+- ``SKIP_LOCKED``: record ``Locked`` (AC-025), never unlock or prompt. On a
+  plug-in (trigger ``start``, never ``reload``) in Desktop Mode it sends one
+  ``notify.locked_notice`` (owner decision 2026-10-11). A LUKS record's next
+  step only says to unlock it in Dolphin: the tool never mounts LUKS.
+  ``REFUSE_REGISTERED``: record ``MountFailed`` with the routing reason.
 - Mount actions: ``reconcile_mount``. ``UNLOCK_REGISTERED`` and the key unit
   interplay of ``MOUNT_INNER_REGISTERED``: ``reconcile_unlock``.
 
@@ -31,7 +34,7 @@ from collections.abc import Callable, Mapping
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final
 
-from steamos_mounter import blockdev, config, locks, routing, systemd
+from steamos_mounter import blockdev, config, locks, notify, routing, systemd
 from steamos_mounter import reconcile_report as report
 from steamos_mounter.blockdev import KNAME_RE, BlockDevice
 from steamos_mounter.errors import MounterError, RegistryError, ToolError
@@ -55,6 +58,7 @@ REASON_PROBE_FAILED: Final = "probe_failed"
 NO_PARTITION_INSTANCE: Final = "no_partition_instance"
 ABSENT: Final = "absent"
 INTERNAL_ERROR: Final = "internal error"
+UNLOCK_IN_DOLPHIN: Final = "Unlock it in Dolphin."
 JOURNAL_LEVELS: Final[Mapping[Action, int]] = MappingProxyType(
     {Action.REJECT: logging.WARNING, Action.FAIL_CLOSED: logging.ERROR}
 )
@@ -249,14 +253,31 @@ def _no_partition_instance(
 def _skip_locked(
     current: report.PassState, inp: RoutingInput, route: Route
 ) -> ReconcileOutcome:
-    """AC-025: a locked container is recorded and left alone."""
+    """AC-025: a locked container is recorded and left alone; a plug-in in
+    Desktop Mode is told how to unlock it."""
     device = inp.tree.devices[inp.kname]
     owner = report.owner_for(
         current, own=device, base=device, named=device, volume=None
     )
-    decided = report.Report(VolumeState.LOCKED, None, None, None, None)
-    _record(current, owner, decided, device)
-    return report.finish(current, owner, route, decided, f"/dev/{device.kname}")
+    decided = report.Report(VolumeState.LOCKED, None, None, None, None, notify=False)
+    mounts_after_unlock = device.fstype == routing.BITLOCKER
+    _record(
+        current,
+        owner,
+        decided,
+        device,
+        None if mounts_after_unlock else _unlock_in_dolphin,
+    )
+    outcome = report.finish(current, owner, route, decided, f"/dev/{device.kname}")
+    if current.trigger is Trigger.START:
+        notice = notify.locked_notice(device, mounts_after_unlock=mounts_after_unlock)
+        report.notify_on_desktop(current, owner.name, notice)
+    return outcome
+
+
+def _unlock_in_dolphin(record: Record) -> None:
+    """The next step of a container the tool will not mount once unlocked."""
+    record.next_step = UNLOCK_IN_DOLPHIN
 
 
 def _refuse_registered(
