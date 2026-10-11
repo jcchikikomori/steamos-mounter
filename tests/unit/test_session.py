@@ -10,6 +10,10 @@ D2, DD-19 and DD-20. Every test runs the real code over the Deck's
   empty ``Display=`` line;
 - ``loginctl-session-5.txt``: the full ``show-session 5``, where ``Display``
   is absent instead of empty (absent equals empty);
+- ``loginctl-session-3-properties.txt``: the same properties from the Deck on
+  systemd 261, asked with one ``-p`` per property (the comma form
+  ``-p Name,Seat,...`` printed nothing there) and printed in loginctl's own
+  order, not the asked one;
 - ``loginctl-session-wayland.txt`` (synthetic): the same session as Wayland.
 
 The display half (``need_display=True``) adds ``systemctl --user
@@ -50,12 +54,54 @@ SEAT_CAPTURE = "loginctl-seat-seat0-active.txt"
 SESSION_CAPTURE = "loginctl-session-5-properties.txt"
 FULL_SESSION_CAPTURE = "loginctl-session-5.txt"
 WAYLAND_FIXTURE = "loginctl-session-wayland.txt"
+SESSION_3_CAPTURE = "loginctl-session-3-properties.txt"
 SESSION_PROPERTIES = (
+    "Name",
+    "Seat",
+    "Active",
+    "Remote",
+    "Class",
+    "Type",
+    "State",
+    "Desktop",
+    "Scope",
+    "Display",
+    "Service",
+    "VTNr",
+)
+# systemd 261's loginctl prints nothing for "-p A,B": one "-p" per property.
+SESSION_PROPERTY_FLAGS = (
+    "-p",
+    "Name",
+    "-p",
+    "Seat",
+    "-p",
+    "Active",
+    "-p",
+    "Remote",
+    "-p",
+    "Class",
+    "-p",
+    "Type",
+    "-p",
+    "State",
+    "-p",
+    "Desktop",
+    "-p",
+    "Scope",
+    "-p",
+    "Display",
+    "-p",
+    "Service",
+    "-p",
+    "VTNr",
+)
+COMMA_PROPERTIES = (
     "Name,Seat,Active,Remote,Class,Type,State,Desktop,Scope,Display,Service,VTNr"
 )
 SHOW_USER = (LOGINCTL, "show-user", "deck", "-p", "Display")
 SHOW_SEAT = (LOGINCTL, "show-seat", "seat0", "-p", "ActiveSession")
-SHOW_SESSION = (LOGINCTL, "show-session", "5", "-p", SESSION_PROPERTIES)
+SHOW_SESSION = (LOGINCTL, "show-session", "5", *SESSION_PROPERTY_FLAGS)
 LOGGER = "steamos_mounter.session"
 
 
@@ -134,7 +180,7 @@ def test_parse_props_full_and_asked_captures_agree_on_every_asked_property():
     full = parse_props(capture_text(FULL_SESSION_CAPTURE))
     asked = parse_props(capture_text(SESSION_CAPTURE))
 
-    assert {name: full[name] for name in SESSION_PROPERTIES.split(",")} == dict(asked)
+    assert {name: full[name] for name in SESSION_PROPERTIES} == dict(asked)
 
 
 def test_parse_props_reads_the_user_capture():
@@ -171,6 +217,45 @@ def test_deck_capture_is_desktop(ctx, fake_runner):
     assert result.xauthority is None
     assert result.detail["Type"] == "x11"
     assert result.detail["Desktop"] == "KDE"
+
+
+def test_show_session_asks_each_property_with_its_own_flag(ctx, fake_runner):
+    script_deck(fake_runner)
+
+    check(ctx, need_display=False)
+
+    argv = fake_runner.argvs[2]
+    assert argv == (
+        LOGINCTL,
+        "show-session",
+        "5",
+        "-p",
+        "Name",
+        "-p",
+        "Seat",
+        "-p",
+        "Active",
+        "-p",
+        "Remote",
+        "-p",
+        "Class",
+        "-p",
+        "Type",
+        "-p",
+        "State",
+        "-p",
+        "Desktop",
+        "-p",
+        "Scope",
+        "-p",
+        "Display",
+        "-p",
+        "Service",
+        "-p",
+        "VTNr",
+    )
+    assert argv.count("-p") == 12
+    assert not any("," in value for value in argv)
 
 
 def test_check_runs_the_three_loginctl_queries_as_the_caller(ctx, fake_runner):
@@ -864,6 +949,101 @@ def test_no_time_left_for_show_environment_is_not_sure(
     assert [r.getMessage() for r in caplog.records] == [
         "session not recognized: no time left for systemctl --user show-environment"
     ]
+
+
+# --- the Deck on systemd 261: session 3, one -p per property ------------------------
+
+SHOW_SESSION_3 = (LOGINCTL, "show-session", "3")
+SESSION_3_CGROUP = "0::/user.slice/user-1000.slice/session-3.scope\n"
+
+
+def script_deck_session_3(fake_runner) -> None:
+    """The Deck as found in Stage A: session 3, where the comma form prints nothing.
+
+    ``show-user deck -p Display`` gave ``Display=3`` there and the seat's
+    ``ActiveSession`` named the same session.
+    """
+    fake_runner.on(SHOW_USER, answer("Display=3\n"))
+    fake_runner.on(SHOW_SEAT, answer("ActiveSession=3\n"))
+    fake_runner.on((*SHOW_SESSION_3, "-p", COMMA_PROPERTIES), answer(""))
+    fake_runner.on((*SHOW_SESSION_3, *SESSION_PROPERTY_FLAGS), SESSION_3_CAPTURE)
+
+
+def session_3_x_server(proc: ProcTree) -> None:
+    """X0's listener, held by an X server in ``session-3.scope``."""
+    proc.net_unix()
+    proc.process(XORG_PID, fds={7: socket_link(X0_INODE)}, cgroup=SESSION_3_CGROUP)
+
+
+def test_session_3_capture_prints_properties_in_its_own_order():
+    lines = capture_text(SESSION_3_CAPTURE).splitlines()
+    names = [line.partition("=")[0] for line in lines]
+
+    assert sorted(names) == sorted(SESSION_PROPERTIES)
+    assert tuple(names) != SESSION_PROPERTIES
+
+
+def test_session_3_capture_is_desktop_on_the_logind_half(ctx, fake_runner):
+    script_deck_session_3(fake_runner)
+
+    result = check(ctx, need_display=False)
+
+    assert result.verdict is Verdict.DESKTOP
+    assert result.session_id == "3"
+    assert result.scope == "session-3.scope"
+    assert dict(result.detail) == {
+        "Name": "deck",
+        "Seat": "seat0",
+        "Active": "yes",
+        "Remote": "no",
+        "Class": "user",
+        "Type": "x11",
+        "State": "active",
+        "Desktop": "KDE",
+        "Scope": "session-3.scope",
+        "Display": "",
+        "Service": "sddm-autologin",
+        "VTNr": "1",
+    }
+
+
+def test_session_3_capture_is_desktop_with_the_display_half(ctx, fake_runner, proc):
+    session_3_x_server(proc)
+    script_deck_session_3(fake_runner)
+    fake_runner.on(SHOW_ENVIRONMENT, answer(MANAGER_ENVIRONMENT))
+
+    result = check_display(ctx)
+
+    assert result.verdict is Verdict.DESKTOP
+    assert result.session_id == "3"
+    assert result.scope == "session-3.scope"
+    assert result.display == ":0"
+    assert result.xorg_pid == XORG_PID
+    assert fake_runner.argvs == [
+        SHOW_USER,
+        SHOW_SEAT,
+        (*SHOW_SESSION_3, *SESSION_PROPERTY_FLAGS),
+        SHOW_ENVIRONMENT,
+    ]
+
+
+def test_empty_show_session_output_is_not_sure(ctx, fake_runner, caplog):
+    # What the comma form gave in Stage A: exit 0 and no output at all, which
+    # reads as every property empty. That is doubt, never a Desktop session.
+    fake_runner.on(SHOW_USER, answer("Display=3\n"))
+    fake_runner.on(SHOW_SEAT, answer("ActiveSession=3\n"))
+    fake_runner.on(SHOW_SESSION_3, answer(""))
+
+    with caplog.at_level(logging.DEBUG, logger=LOGGER):
+        result = check(ctx, need_display=False)
+
+    assert result.verdict is Verdict.NOT_SURE
+    assert result.detail["Name"] == ""
+    assert [record.levelname for record in caplog.records] == ["NOTICE"]
+    assert caplog.messages[0].startswith(
+        "session not recognized: Name, Seat, Active, Remote, Class, Type, State,"
+        " Desktop did not match;"
+    )
 
 
 # --- user_manager_display ------------------------------------------------------------

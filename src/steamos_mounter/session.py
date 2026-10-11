@@ -7,10 +7,13 @@ the runner, all as the caller (``loginctl show-*`` needs no privilege):
 1. ``loginctl show-user <user> -p Display``: the user's primary graphical
    session; absent or empty means there is none (``NONE``).
 2. ``loginctl show-seat <seat> -p ActiveSession`` must name that session.
-3. ``loginctl show-session <id> -p ...`` must match the allow-list: the
-   session user's name, the platform's seat, class, desktops and session types
-   (``SessionAllowList``), plus logind's own "in front of the user" values
-   ``Active=yes``, ``Remote=no`` and ``State=active``.
+3. ``loginctl show-session <id> -p Name -p Seat ...`` (one ``-p`` per
+   property: systemd 261's loginctl prints nothing for ``-p Name,Seat``)
+   must match the allow-list: the session user's name, the platform's seat,
+   class, desktops and session types (``SessionAllowList``), plus logind's own
+   "in front of the user" values ``Active=yes``, ``Remote=no`` and
+   ``State=active``. ``Display`` is reported, not matched: logind leaves it
+   empty for this X11 session.
 
 The key dialog (``need_display=True``) also needs the display, which logind
 leaves empty for this X11 session, so it is found through the X server:
@@ -126,11 +129,22 @@ class _Props(dict[str, str]):
         return ""
 
 
+def property_flags(props: tuple[str, ...]) -> tuple[str, ...]:
+    """``("-p", name)`` for each property, in order.
+
+    loginctl needs one ``-p`` per property: on systemd 261 ``-p Name,Seat``
+    exits 0 and prints nothing, which would read as every value empty.
+    """
+    return tuple(flag for name in props for flag in ("-p", name))
+
+
 def parse_props(text: str) -> dict[str, str]:
     """``loginctl show-*`` output as a dict; an absent key reads as ``""``.
 
     loginctl prints properties with systemctl's printer, so the parsing
     (``Name=value`` lines, quoted values unquoted) is ``systemd.parse_show``.
+    Values are read by name only: loginctl prints them in its own order, not
+    in the order they were asked for.
     The full ``show-session`` omits an empty ``Display`` while ``-p Display``
     prints ``Display=``; both read as ``""`` here, and reading an absent key
     adds nothing to the dict.
@@ -278,12 +292,12 @@ class _Queries:
     def run(
         self, verb: str, name: str, props: tuple[str, ...]
     ) -> dict[str, str] | CommandResult | None:
-        """``loginctl <verb> <name> -p <props>`` parsed; the result when it
-        failed; None when the deadline left no time to ask."""
+        """``loginctl <verb> <name> -p <prop> ...`` parsed; the result when
+        it failed; None when the deadline left no time to ask."""
         timeout = self.timeout()
         if timeout is None:
             return None
-        argv = (self.ctx.platform.tools.loginctl, verb, name, "-p", ",".join(props))
+        argv = (self.ctx.platform.tools.loginctl, verb, name, *property_flags(props))
         result = self.ctx.runner.run(Command(argv=argv, timeout=timeout))
         if result.returncode != 0:
             return result

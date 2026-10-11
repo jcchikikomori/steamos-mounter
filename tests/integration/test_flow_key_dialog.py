@@ -201,8 +201,8 @@ def test_rejected_key_dialog_entered_reload_mounts_and_yes_saves(
       - FakeRunner script:
         loginctl show-user deck -p Display -> fixtures/deck/loginctl-user-deck.txt
         loginctl show-seat seat0 -p ActiveSession -> "ActiveSession=5"
-        loginctl show-session 5 -p Name,Seat,Active,Remote,Class,Type,State,
-            Desktop,Scope,Display,Service,VTNr
+        loginctl show-session 5 -p Name -p Seat -p Active -p Remote -p Class
+            -p Type -p State -p Desktop -p Scope -p Display -p Service -p VTNr
             -> fixtures/deck/loginctl-session-5-properties.txt
         systemctl --user show-environment (user 1000, log_output False)
             -> "DISPLAY=:0\\nOTHER=dropped\\n"

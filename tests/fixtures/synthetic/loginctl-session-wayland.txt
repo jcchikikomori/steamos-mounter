@@ -1,4 +1,4 @@
-# synthetic: loginctl show-session 5 -p Name,Seat,Active,Remote,Class,Type,State,Desktop,Scope,Display,Service,VTNr as on the Deck (deck/loginctl-session-5-properties.txt) with Type=wayland; no Wayland Desktop Mode session was captured (ADR-0005 D2.3)
+# synthetic: loginctl show-session 5 -p Name -p Seat -p Active -p Remote -p Class -p Type -p State -p Desktop -p Scope -p Display -p Service -p VTNr as on the Deck (deck/loginctl-session-5-properties.txt) with Type=wayland; no Wayland Desktop Mode session was captured (ADR-0005 D2.3)
 Name=deck
 VTNr=1
 Seat=seat0

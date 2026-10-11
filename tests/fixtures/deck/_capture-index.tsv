@@ -60,3 +60,4 @@ evidence-blockdev-event-partsets.txt	0	evidence
 udev-run-90-holo-partsets-all.rules.txt	0	fixture
 loginctl-list-sessions.json	0	fixture
 systemctl-show-device-aliases.txt	0	fixture
+loginctl-session-3-properties.txt	0	fixture

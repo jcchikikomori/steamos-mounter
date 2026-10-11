@@ -1,0 +1,12 @@
+Name=deck
+VTNr=1
+Seat=seat0
+Display=
+Remote=no
+Service=sddm-autologin
+Desktop=KDE
+Scope=session-3.scope
+Type=x11
+Class=user
+Active=yes
+State=active
