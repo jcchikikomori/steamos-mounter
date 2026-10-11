@@ -9,6 +9,7 @@ file	/etc/systemd/system/steamos-mounter@.service	root:root	0644	data/steamos-mo
 file	/etc/systemd/system/steamos-mounter-auto@.service	root:root	0644	data/steamos-mounter-auto@.service	unit
 file	/etc/systemd/system/steamos-mounter-key@.service	root:root	0644	data/steamos-mounter-key@.service	unit
 file	/etc/udev/rules.d/90-steamos-mounter.rules	root:root	0644	data/90-steamos-mounter.rules	udev-rule
+file	/etc/polkit-1/rules.d/49-steamos-mounter.rules	root:root	0644	data/49-steamos-mounter.rules	polkit-rule
 dir	/var/lib/steamos-mounter	root:root	0755	-	state
 dir	/var/lib/steamos-mounter/keys	root:root	0700	-	keys
 # /run rows live on tmpfs: created on demand by every root entry (records.ensure_runtime_dirs) and by the installer.

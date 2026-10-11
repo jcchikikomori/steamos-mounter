@@ -35,6 +35,7 @@ from tests.helpers.installer_env import (
     KEY_UNITS,
     KEYS_DIR,
     OPT,
+    POLKIT_RULE,
     REGISTRY,
     RUN_TREE,
     UDEVADM_RELOAD,
@@ -158,6 +159,29 @@ def test_uninstall_order_and_kept_registry(installed, tmp_path, fake_runner):
     assert report.lines[-1] == StepLine("remove /opt/steamos-mounter", "ok", "")
 
 
+def test_polkit_rule_goes_with_the_other_files_after_the_stops(
+    installed, tmp_path, fake_runner
+):
+    """Removed in step 6, like the units; polkit's own directory stays."""
+    rule = tmp_path / POLKIT_RULE
+    at_stop: list[bool] = []
+    script_uninstall(
+        fake_runner, on_instances_stop=lambda _cmd: at_stop.append(rule.exists())
+    )
+
+    report = installer.uninstall(installed, purge=False)
+
+    steps = [line.step for line in report.lines]
+    assert report.exit_code == ExitCode.OK
+    assert at_stop == [True]
+    assert lines_of(report)[f"remove /{POLKIT_RULE}"] == StepLine(
+        f"remove /{POLKIT_RULE}", "ok", ""
+    )
+    assert steps.index("stop instances") < steps.index(f"remove /{POLKIT_RULE}")
+    assert not rule.exists()
+    assert os.listdir(rule.parent) == []
+
+
 def test_links_are_gone_before_the_first_stop(installed, tmp_path, fake_runner):
     wired: list[bool] = []
     script_uninstall(
@@ -181,6 +205,7 @@ def test_purge_deletes_the_registry_and_the_keys(installed, tmp_path, fake_runne
     assert sorted(os.listdir(tmp_path / "etc")) == [
         "atomic-update.conf.d",
         "os-release",
+        "polkit-1",
         "systemd",
         "udev",
     ]

@@ -1,8 +1,9 @@
 """The data files equal the Design Doc's authoritative blocks, byte for byte.
 
 Design Doc "Authoritative Text in This Document": the three unit templates,
-the udev rule, the keep-list drop-in and the install manifest must match the
-document byte for byte unless the document is revised. For each ``data/``
+the udev rule, the polkit rule, the keep-list drop-in and the install
+manifest must match the document byte for byte unless the document is
+revised. For each ``data/``
 file this test finds its heading, takes the next fenced block and compares it
 with the shipped file. The document shows the manifest with spaces (its
 formatter converts tabs), so each manifest record from the document is joined
@@ -31,6 +32,7 @@ HEADINGS = {
     "steamos-mounter-auto@.service": "#### `data/steamos-mounter-auto@.service`",
     "steamos-mounter-key@.service": "#### `data/steamos-mounter-key@.service`",
     "90-steamos-mounter.rules": "### udev Rule (Authoritative)",
+    "49-steamos-mounter.rules": "### polkit Rule (Authoritative)",
     "steamos-mounter.conf": "### Keep-list Drop-in (Authoritative)",
     MANIFEST: "### Install Manifest (Authoritative)",
 }

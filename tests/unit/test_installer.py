@@ -51,6 +51,7 @@ from tests.helpers.installer_env import (
     ETC_FILES,
     KEPT_REGISTRY,
     KEYS_DIR,
+    POLKIT_RULE,
     REGISTRY,
     RELEASE_NAME,
     RELEASES,
@@ -313,6 +314,29 @@ def test_without_release_the_active_release_is_repaired(rctx, release, host, rel
     assert "compile" not in lines_of(report)
     assert statuses(report)[f"write /{ETC_FILES[1]}"] == "ok"
     assert (host / ETC_FILES[1]).exists()
+
+
+def test_polkit_rule_is_installed_root_owned_0644(rctx, release, host, reloads):
+    report = install(rctx, release)
+
+    rule = host / POLKIT_RULE
+    assert statuses(report)[f"write /{POLKIT_RULE}"] == "ok"
+    assert mode_of(rule) == 0o644
+    assert rule.stat().st_uid == rctx.platform.trusted_uid
+    assert rule.read_bytes() == (release / "data/49-steamos-mounter.rules").read_bytes()
+
+
+def test_without_polkits_rules_dir_only_that_write_fails(rctx, release, host, reloads):
+    """The directory is polkit's (root:polkitd 0750): never created here."""
+    (host / POLKIT_RULE).parent.rmdir()
+
+    report = install(rctx, release)
+
+    failed = [line.step for line in report.lines if line.status == "failed"]
+    assert report.exit_code == ExitCode.PARTIAL
+    assert failed == [f"write /{POLKIT_RULE}"]
+    assert not (host / POLKIT_RULE).parent.exists()
+    assert all((host / path).exists() for path in ETC_FILES if path != POLKIT_RULE)
 
 
 @pytest.mark.parametrize("current", [None, "elsewhere/x", "releases/../x"])

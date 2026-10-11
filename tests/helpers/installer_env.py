@@ -46,11 +46,14 @@ ETC_FILES = (
     "etc/systemd/system/steamos-mounter-auto@.service",
     "etc/systemd/system/steamos-mounter-key@.service",
     "etc/udev/rules.d/90-steamos-mounter.rules",
+    "etc/polkit-1/rules.d/49-steamos-mounter.rules",
 )
+POLKIT_RULE = ETC_FILES[5]
 # The parts of the host the installer expects to exist already.
 SYSTEM_DIRS = (
     "etc/systemd/system",
     "etc/udev/rules.d",
+    "etc/polkit-1/rules.d",
     "etc/atomic-update.conf.d",
     "var/lib",
     "opt",

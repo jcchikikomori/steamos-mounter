@@ -12,7 +12,8 @@ Update and Uninstall" diagram; ADR-0004 D7 and D8. Split out of
 4. Every ``.device.wants`` link, then ``daemon-reload``: no registered ones.
 5. Key units, then every other instance, stopped blocking (120 s); each
    record's ``busy`` list is read once they are down.
-6. The other manifest ``file`` rows (units, drop-in), then ``daemon-reload``.
+6. The other manifest ``file`` rows (units, polkit rule, drop-in), then
+   ``daemon-reload``.
 7. The registry moves to ``kept-config.toml`` (the keys stay), or with
    ``--purge`` the registry, the keys and ``/var/lib/steamos-mounter`` go.
 8. ``/run/steamos-mounter``, ``/etc/steamos-mounter`` when empty, then

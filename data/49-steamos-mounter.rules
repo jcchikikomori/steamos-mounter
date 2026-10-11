@@ -1,0 +1,46 @@
+// Installed by steamos-mounter. Do not edit: install and update overwrite this file.
+// Lets a local, active wheel user mount the tool's own BitLocker mappings (steamos-mounter-<UUID>) without the
+// admin password. Every other request returns nothing, so the default policy decides.
+(function () {
+    var MOUNT_ACTIONS = [
+        "org.freedesktop.udisks2.filesystem-mount",
+        "org.freedesktop.udisks2.filesystem-mount-other-seat"
+    ];
+    var MAPPER_PREFIX = "/dev/mapper/";
+    var DM_DEVICE = /^\/dev\/(dm-[0-9]+)$/;
+    var OWN_MAPPING = /^steamos-mounter-(?:[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}|[0-9A-Fa-f]{16}|[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})$/;
+
+    function mappingName(device) {
+        if (device.indexOf(MAPPER_PREFIX) === 0) {
+            return device.substring(MAPPER_PREFIX.length);
+        }
+        var dm = DM_DEVICE.exec(device);
+        if (dm === null) {
+            return null;
+        }
+        var path = "/sys/class/block/" + dm[1] + "/dm/name";
+        try {
+            return polkit.spawn(["/usr/bin/cat", path]).replace(/\n$/, "");
+        } catch (error) {
+            polkit.log("steamos-mounter: cannot read " + path + ": " + error);
+            return null;
+        }
+    }
+
+    polkit.addRule(function (action, subject) {
+        if (MOUNT_ACTIONS.indexOf(action.id) < 0) {
+            return;
+        }
+        if (!subject.isInGroup("wheel") || !subject.local || !subject.active) {
+            return;
+        }
+        var device = action.lookup("device");
+        if (typeof device !== "string") {
+            return;
+        }
+        var name = mappingName(device);
+        if (name !== null && OWN_MAPPING.test(name)) {
+            return polkit.Result.YES;
+        }
+    });
+}());

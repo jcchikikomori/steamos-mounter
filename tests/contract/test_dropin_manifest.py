@@ -15,7 +15,7 @@ The ``rsync`` tests replay SteamOS's own filter with the real rsync against the
 Deck's keep-list captures: the drop-in keeps every manifest ``/etc`` path and a
 sample wants link (positive control), the drop-in alone with an empty keep-list
 keeps them too (ADR-0004 D2: no reliance on Valve's defaults), and without it the
-registry and the udev rule are lost (negative control).
+registry, the udev rule and the polkit rule are lost (negative control).
 """
 
 from pathlib import Path
@@ -38,6 +38,7 @@ RUN = "/run/"
 DROPIN_INSTALLED = "/etc/atomic-update.conf.d/steamos-mounter.conf"
 REGISTRY = "/etc/steamos-mounter/config.toml"
 UDEV_RULE = "/etc/udev/rules.d/90-steamos-mounter.rules"
+POLKIT_RULE = "/etc/polkit-1/rules.d/49-steamos-mounter.rules"
 UNIT_TEMPLATE = "/etc/systemd/system/steamos-mounter@.service"
 WANTS_PATTERN = "/etc/systemd/system/*.device.wants/steamos-mounter@*.service"
 MEDIABOX_LINK = (
@@ -52,9 +53,10 @@ ETC_PATHS = (
     "/etc/systemd/system/steamos-mounter-auto@.service",
     "/etc/systemd/system/steamos-mounter-key@.service",
     UDEV_RULE,
+    POLKIT_RULE,
 )
 # A path component starting with one of these can only match our own files.
-OWN_PREFIXES = ("steamos-mounter", "90-steamos-mounter")
+OWN_PREFIXES = ("steamos-mounter", "90-steamos-mounter", "49-steamos-mounter")
 DROPIN_COMMENT = "##"
 TAB = "\t"
 
@@ -83,6 +85,9 @@ MANIFEST_ROWS = (
         "unit",
     ),
     Entry("file", UDEV_RULE, ROOT, 0o644, "data/90-steamos-mounter.rules", "udev-rule"),
+    Entry(
+        "file", POLKIT_RULE, ROOT, 0o644, "data/49-steamos-mounter.rules", "polkit-rule"
+    ),
     Entry("dir", "/var/lib/steamos-mounter", ROOT, 0o755, "-", "state"),
     Entry("dir", "/var/lib/steamos-mounter/keys", ROOT, 0o700, "-", "keys"),
     Entry("dir", "/run/steamos-mounter", ROOT, 0o755, "-", "runtime"),
@@ -155,6 +160,8 @@ def test_glob_follows_rsync_wildcards(pattern, path, expected):
         ("/etc/steamos-mounter/**", True),
         (WANTS_PATTERN, True),
         ("/etc/udev/rules.d/90-steamos-mounter.rules", True),
+        (POLKIT_RULE, True),
+        ("/etc/polkit-1/rules.d/*.rules", False),
         ("/etc/systemd/system/*.service", False),
         ("/etc/**", False),
         ("/etc/*steamos-mounter*/x", False),
@@ -283,10 +290,10 @@ def test_dropin_alone_keeps_every_manifest_etc_path_and_a_wants_link():
 
 
 @pytest.mark.rsync
-def test_without_the_dropin_the_registry_and_the_udev_rule_are_lost():
+def test_without_the_dropin_the_registry_and_both_rules_are_lost():
     keep_list = load_fixture("atomic-update-keep.conf").decode("utf-8")
     expected = expected_etc()
 
     covered = replay(keep_list, [all_conf_dropin()], expected)
 
-    assert set(expected) - covered == {REGISTRY, UDEV_RULE}
+    assert set(expected) - covered == {REGISTRY, UDEV_RULE, POLKIT_RULE}
