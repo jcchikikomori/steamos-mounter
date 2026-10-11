@@ -33,7 +33,7 @@ from steamos_mounter.routing import AUTO_TEMPLATE, REGISTERED_TEMPLATE, Action
 if TYPE_CHECKING:
     from steamos_mounter.context import Context
 
-# 90-steamos-mounter.rules: KERNEL and ENV{ID_FS_TYPE}.
+# 90-steamos-mounter.rules coarse filter: KERNEL and ENV{ID_FS_TYPE}, not the hint.
 RULE_KERNEL_PREFIXES: Final = ("sd", "mmcblk", "dm-")
 RULE_FSTYPES: Final = frozenset(
     {"ntfs", "exfat", "vfat", "btrfs", "BitLocker", "crypto_LUKS"}

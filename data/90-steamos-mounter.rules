@@ -1,7 +1,9 @@
 # Installed by steamos-mounter. Do not edit: install and update overwrite this file.
-# Coarse filter only: ask systemd for an auto instance. Every decision is made by the handler.
+# Coarse filter: ask systemd for an auto instance. Every decision is made by the handler.
+# udisks hint: the tool's own BitLocker mappings are not system devices, so Dolphin remounts them without a password.
 ACTION!="add|change", GOTO="steamos_mounter_end"
 SUBSYSTEM!="block", GOTO="steamos_mounter_end"
 KERNEL!="sd*|mmcblk*|dm-*", GOTO="steamos_mounter_end"
 ENV{ID_FS_TYPE}=="ntfs|exfat|vfat|btrfs|BitLocker|crypto_LUKS", ENV{SYSTEMD_WANTS}+="steamos-mounter-auto@.service"
+KERNEL=="dm-*", ENV{DM_NAME}=="steamos-mounter-*", ENV{UDISKS_SYSTEM}="0"
 LABEL="steamos_mounter_end"

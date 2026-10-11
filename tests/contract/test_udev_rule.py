@@ -2,9 +2,16 @@
 
 Design Doc "udev Rule (Authoritative)", ADR-0002 D2, IP-01 and the Fact
 Disposition Table row "udev properties never decide": the rule is a coarse
-filter that only appends one ``SYSTEMD_WANTS`` entry. It uses only ``GOTO``,
-``LABEL`` and that one assignment, and never ``RUN``, ``PROGRAM``, ``IMPORT``,
-``OWNER``, ``MODE`` or ``SYMLINK``.
+filter that appends one ``SYSTEMD_WANTS`` entry, plus one udisks hint. It uses
+only ``GOTO``, ``LABEL``, that ``SYSTEMD_WANTS`` entry and the hint, and never
+``RUN``, ``PROGRAM``, ``IMPORT``, ``OWNER``, ``MODE`` or ``SYMLINK``.
+
+The hint, ``ENV{UDISKS_SYSTEM}="0"``, applies only to the tool's own BitLocker
+mappings (``dm-*`` whose ``DM_NAME`` starts with ``steamos-mounter-``). Without
+it udisks treats such a mapping as a system device, so remounting it from
+Dolphin after an unmount asks for the admin password (Stage B V-03, owner
+decision 2026-10-11). Other dm names (a Dolphin-unlocked ``bitlk-...`` or
+``luks-...`` mapping, LVM volumes) keep whatever udisks decides for them.
 
 A small simulator runs the rule over the seven Deck property captures
 (``udevadm info`` output): the BitLocker container, the ntfs partition and the
@@ -14,8 +21,8 @@ LUKS2 both report ``ID_FS_TYPE=crypto_LUKS``) gets one too, so a locked one
 can be recorded and notified (owner decision 2026-10-11). The simulator supports only
 what the rule needs: ``==``/``!=`` matches on ``ACTION``, ``SUBSYSTEM``,
 ``KERNEL`` and ``ENV{...}`` with ``|`` alternatives and shell globs, ``GOTO``,
-``LABEL`` and ``ENV{...}+=``. Anything else is refused, so the simulator cannot
-silently ignore a key it does not understand.
+``LABEL``, ``ENV{SYSTEMD_WANTS}+=`` and ``ENV{...}=``. Anything else is
+refused, so the simulator cannot silently ignore a key it does not understand.
 """
 
 import re
@@ -25,7 +32,7 @@ from pathlib import Path, PurePosixPath
 
 import pytest
 
-from steamos_mounter import installer_start
+from steamos_mounter import bitlocker, installer_start
 from tests.helpers.fixtures import load_fixture
 
 REPO = Path(__file__).resolve().parents[2]
@@ -33,10 +40,13 @@ RULE_FILE = REPO / "data" / "90-steamos-mounter.rules"
 
 AUTO_TEMPLATE = "steamos-mounter-auto@.service"
 WANTS = "SYSTEMD_WANTS"
+UDISKS_SYSTEM = "UDISKS_SYSTEM"
+OWN_MAPPING_UUID = "4a7f2c1e-0b3d-4e5f-9a8b-7c6d5e4f3a2b"
 FORBIDDEN_KEYS = ("RUN", "PROGRAM", "IMPORT", "OWNER", "MODE", "SYMLINK")
 MATCH_KEYS = frozenset({"ACTION", "SUBSYSTEM", "KERNEL", "ENV"})
 MATCH_OPERATORS = frozenset({"==", "!="})
 END_LABEL = "steamos_mounter_end"
+SUPPORTED_TYPES = "ntfs|exfat|vfat|btrfs|BitLocker|crypto_LUKS"
 # KEY or KEY{attr}, an operator, a double-quoted value, then a comma or the end.
 TOKEN = re.compile(
     r"\s*(?P<key>[A-Z_]+)(?:\{(?P<attr>[^}]+)\})?\s*"
@@ -56,6 +66,14 @@ class Token:
 class Event:
     action: str
     properties: dict[str, str]
+
+
+@dataclass(frozen=True, slots=True)
+class Outcome:
+    """What the rule did to one event: appended wants and assigned properties."""
+
+    wants: list[str]
+    env: dict[str, str]
 
 
 def parse_rule_line(line: str) -> tuple[Token, ...]:
@@ -124,7 +142,7 @@ def _all_match(tokens: tuple[Token, ...], event: Event) -> bool:
     return all(_matches(token, event) for token in matchers)
 
 
-def _apply(tokens: tuple[Token, ...], wants: list[str]) -> str | None:
+def _apply(tokens: tuple[Token, ...], outcome: Outcome) -> str | None:
     """Run the assignments of a matching line; returns its ``GOTO`` label."""
     goto: str | None = None
     for token in tokens:
@@ -133,26 +151,33 @@ def _apply(tokens: tuple[Token, ...], wants: list[str]) -> str | None:
         if token.key == "GOTO" and token.op == "=":
             goto = token.value
         elif token.key == "ENV" and token.attr == WANTS and token.op == "+=":
-            wants.extend(token.value.split())
+            outcome.wants.extend(token.value.split())
+        elif token.key == "ENV" and token.attr != WANTS and token.op == "=":
+            outcome.env[token.attr or ""] = token.value
         else:
             raise ValueError(f"simulator does not model {token.key}{token.op}")
     return goto
 
 
-def simulate(text: str, event: Event) -> list[str]:
-    """The ``SYSTEMD_WANTS`` entries the rule text appends for ``event``.
+def run_rule(text: str, event: Event) -> Outcome:
+    """The wants and properties the rule text gives ``event``.
 
     Raises ``ValueError`` for a key or operator the simulator does not model.
     """
-    wants: list[str] = []
+    outcome = Outcome([], {})
     goto: str | None = None
     for tokens in rule_lines(text):
         label = _label(tokens)
         if goto is not None:
             goto = None if label == goto else goto
         elif label is None and _all_match(tokens, event):
-            goto = _apply(tokens, wants)
-    return wants
+            goto = _apply(tokens, outcome)
+    return outcome
+
+
+def simulate(text: str, event: Event) -> list[str]:
+    """The ``SYSTEMD_WANTS`` entries the rule text appends for ``event``."""
+    return run_rule(text, event).wants
 
 
 def rule_text() -> str:
@@ -165,6 +190,25 @@ def all_tokens() -> list[Token]:
 
 def capture_event(name: str, action: str = "add") -> Event:
     return Event(action, parse_properties(load_fixture(name).decode("utf-8")))
+
+
+def mapping_event(dm_name: str, action: str = "add", **properties: str) -> Event:
+    """The Deck's ntfs dm mapping capture, renamed to ``dm_name``."""
+    event = capture_event("udev-dm-0.txt", action)
+    return Event(action, {**event.properties, "DM_NAME": dm_name, **properties})
+
+
+def own_mapping_name() -> str:
+    return bitlocker.mapping_name(OWN_MAPPING_UUID)
+
+
+def hint_lines() -> list[tuple[Token, ...]]:
+    """Rule lines that assign ``UDISKS_SYSTEM``."""
+    return [
+        tokens
+        for tokens in rule_lines(rule_text())
+        if any(token.attr == UDISKS_SYSTEM for token in tokens)
+    ]
 
 
 # --- the simulator itself -------------------------------------------------------------
@@ -196,6 +240,21 @@ def test_simulator_refuses_a_match_key_it_does_not_model():
         simulate('ATTR=="x", ENV{SYSTEMD_WANTS}+="a"\n', event)
 
 
+def test_simulator_refuses_an_env_operator_it_does_not_model():
+    event = Event("add", {"DEVNAME": "/dev/sdb5"})
+
+    with pytest.raises(ValueError, match="does not model ENV:="):
+        simulate('KERNEL=="sd*", ENV{X}:="1"\n', event)
+
+
+def test_simulator_records_an_env_assignment():
+    text = 'KERNEL=="sd*", ENV{X}="1"\nKERNEL=="vd*", ENV{Y}="2"\n'
+
+    outcome = run_rule(text, Event("add", {"DEVNAME": "/dev/sda"}))
+
+    assert outcome == Outcome([], {"X": "1"})
+
+
 def test_simulator_goto_skips_to_its_label():
     text = 'KERNEL=="sd*", GOTO="end"\nENV{SYSTEMD_WANTS}+="a"\nLABEL="end"\n'
     text += 'ENV{SYSTEMD_WANTS}+="b"\n'
@@ -211,12 +270,53 @@ def test_capture_parser_splits_at_the_first_equals_sign():
 # --- rule shape (IP-01, ADR-0002 D2) --------------------------------------------------
 
 
-def test_rule_assigns_only_goto_label_and_one_systemd_wants():
+def test_rule_assigns_only_goto_label_one_systemd_wants_and_the_udisks_hint():
     assignments = [token for token in all_tokens() if token.op not in MATCH_OPERATORS]
-    wants = [token for token in assignments if token.key == "ENV"]
+    env = [token for token in assignments if token.key == "ENV"]
 
     assert {token.key for token in assignments} == {"GOTO", "LABEL", "ENV"}
-    assert wants == [Token("ENV", WANTS, "+=", AUTO_TEMPLATE)]
+    assert env == [
+        Token("ENV", WANTS, "+=", AUTO_TEMPLATE),
+        Token("ENV", UDISKS_SYSTEM, "=", "0"),
+    ]
+
+
+def test_coarse_filter_and_systemd_wants_lines_are_unchanged():
+    lines = [
+        tokens
+        for tokens in rule_lines(rule_text())
+        if not any(token.attr == UDISKS_SYSTEM for token in tokens)
+    ]
+    goto = Token("GOTO", None, "=", END_LABEL)
+
+    assert lines == [
+        (Token("ACTION", None, "!=", "add|change"), goto),
+        (Token("SUBSYSTEM", None, "!=", "block"), goto),
+        (Token("KERNEL", None, "!=", "sd*|mmcblk*|dm-*"), goto),
+        (
+            Token("ENV", "ID_FS_TYPE", "==", SUPPORTED_TYPES),
+            Token("ENV", WANTS, "+=", AUTO_TEMPLATE),
+        ),
+        (Token("LABEL", None, "=", END_LABEL),),
+    ]
+
+
+def test_udisks_hint_is_one_line_scoped_to_the_tools_own_dm_mappings():
+    assert hint_lines() == [
+        (
+            Token("KERNEL", None, "==", "dm-*"),
+            Token("ENV", "DM_NAME", "==", f"{bitlocker.MAPPING_PREFIX}*"),
+            Token("ENV", UDISKS_SYSTEM, "=", "0"),
+        )
+    ]
+
+
+def test_udisks_hint_sits_inside_the_coarse_filter_before_the_end_label():
+    lines = rule_lines(rule_text())
+    [hint] = hint_lines()
+    end = next(index for index, tokens in enumerate(lines) if _label(tokens))
+
+    assert 3 <= lines.index(hint) < end
 
 
 def test_rule_matches_only_on_action_subsystem_kernel_and_env():
@@ -326,13 +426,109 @@ def test_other_spellings_of_luks_get_nothing(fstype):
     assert simulate(rule_text(), event) == []
 
 
+# --- the udisks hint on the tool's own mappings ---------------------------------------
+
+
+@pytest.mark.parametrize("action", ["add", "change"])
+def test_own_mapping_gets_the_udisks_hint_and_its_auto_instance(action):
+    outcome = run_rule(rule_text(), mapping_event(own_mapping_name(), action))
+
+    assert outcome == Outcome([AUTO_TEMPLATE], {UDISKS_SYSTEM: "0"})
+
+
+def test_own_mapping_name_matches_the_hint_glob():
+    assert fnmatchcase(own_mapping_name(), "steamos-mounter-*")
+
+
+def test_own_mapping_without_a_filesystem_type_gets_the_hint_and_no_auto_instance():
+    event = mapping_event(own_mapping_name(), ID_FS_TYPE="")
+
+    assert run_rule(rule_text(), event) == Outcome([], {UDISKS_SYSTEM: "0"})
+
+
+@pytest.mark.parametrize(
+    "dm_name",
+    [
+        "PAT4T4SHUAWEI_PERSONAL_4_3_2024",
+        "bitlk-88d48067-d480-58f8-0000-000000000000",
+        "luks-4a7f2c1e-0b3d-4e5f-9a8b-7c6d5e4f3a2b",
+        "vg0-home",
+        "steamos-mounter",
+        "steamos-mounterx-4a7f2c1e",
+        "STEAMOS-MOUNTER-4a7f2c1e",
+        "x-steamos-mounter-4a7f2c1e",
+        "",
+    ],
+    ids=[
+        "dolphin-label-name",
+        "udisks-bitlk",
+        "udisks-luks",
+        "lvm",
+        "bare-prefix-without-dash",
+        "near-miss-prefix",
+        "wrong-case",
+        "prefix-not-at-start",
+        "no-dm-name",
+    ],
+)
+def test_other_dm_names_get_no_udisks_hint(dm_name):
+    outcome = run_rule(rule_text(), mapping_event(dm_name))
+
+    assert outcome == Outcome([AUTO_TEMPLATE], {})
+
+
+@pytest.mark.parametrize("devname", ["/dev/sdb5", "/dev/mmcblk0p1", "/dev/loop0"])
+def test_a_non_dm_kernel_with_an_own_dm_name_gets_no_udisks_hint(devname):
+    event = mapping_event(own_mapping_name(), DEVNAME=devname)
+
+    assert run_rule(rule_text(), event).env == {}
+
+
+@pytest.mark.parametrize("action", ["remove", "bind", "move"])
+def test_own_mapping_gets_no_udisks_hint_outside_add_and_change(action):
+    assert run_rule(rule_text(), mapping_event(own_mapping_name(), action)).env == {}
+
+
+def test_own_mapping_outside_the_block_subsystem_gets_no_udisks_hint():
+    event = mapping_event(own_mapping_name(), SUBSYSTEM="net")
+
+    assert run_rule(rule_text(), event) == Outcome([], {})
+
+
+@pytest.mark.parametrize(
+    "capture",
+    [
+        "udev-sdb1.txt",
+        "udev-sdb5.txt",
+        "udev-dm-0.txt",
+        "udev-sda1.txt",
+        "udev-mmcblk0p1.txt",
+        "udev-nvme0n1p8.txt",
+        "udev-sdb2.txt",
+    ],
+)
+def test_no_deck_capture_gets_the_udisks_hint(capture):
+    assert run_rule(rule_text(), capture_event(capture, "change")).env == {}
+
+
 # --- the installer's start filter mirrors the rule ------------------------------------
 
 
 def _rule_values(key: str, attr: str | None) -> set[str]:
+    """The ``|`` alternatives of the coarse filter's ``key`` match.
+
+    The coarse filter is the ``GOTO`` lines and the ``SYSTEMD_WANTS`` line; the
+    udisks hint line is not part of it.
+    """
+    filter_lines = [
+        tokens
+        for tokens in rule_lines(rule_text())
+        if any(token.key == "GOTO" or token.attr == WANTS for token in tokens)
+    ]
     [token] = [
         token
-        for token in all_tokens()
+        for tokens in filter_lines
+        for token in tokens
         if (token.key, token.attr) == (key, attr) and token.op in MATCH_OPERATORS
     ]
     return set(token.value.split("|"))
