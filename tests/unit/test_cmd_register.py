@@ -12,6 +12,7 @@ lsblk, findmnt, setfacl, cryptsetup and systemctl through the fake runner.
 """
 
 import io
+import json
 import logging
 import os
 import stat
@@ -22,6 +23,7 @@ import pytest
 
 from steamos_mounter import config, wiring
 from steamos_mounter.errors import ExitCode
+from steamos_mounter.platforms.steamos import TOOLS
 from tests.helpers.builders import (
     MEDIABOX,
     PERSONAL,
@@ -68,12 +70,16 @@ from tests.helpers.flows import (
     CRYPTSETUP,
     SETFACL,
     make_keys_dir,
+    make_leaf,
+    read_record,
+    readback_argv,
     write_key_file,
     write_record,
 )
 
 TEMPLATE = "/etc/systemd/system/steamos-mounter@.service"
 TEST_KEY = b"TEST-KEY-7f3a9c-do-not-leak"
+STAMP = "2026-10-08T02:11:40Z"  # the FakeClock's start
 TEST_ARGV = (CRYPTSETUP, "open", "--test-passphrase", "--type", "bitlk", "--key-file=-")
 MEDIABOX_ADDED = (
     f"registered MEDIABOX ({MEDIABOX_UUID}) at {MEDIABOX_PATH}\n"
@@ -233,6 +239,322 @@ def test_an_auto_mounted_volume_learns_its_fixed_path_applies_later(
         "MEDIABOX is mounted at /run/media/deck/MEDIABOX-2 now. The fixed path"
         " applies from the next plug-in, boot, or mount after an unmount"
     )
+
+
+# --- add: taking over the tool's own auto mount (task 57c) ----------------------------
+
+SDB5_AUTO_RECORD = "run/steamos-mounter/records/auto/sdb5-8_21.json"
+SDB1_AUTO_RECORD = "run/steamos-mounter/records/auto/sdb1-8_17.json"
+UMOUNT = TOOLS.umount
+MEDIABOX_ELSEWHERE = "/run/media/deck/MEDIABOX-2"
+MEDIABOX_ROW = (MEDIABOX_PATH, "/dev/sdb5", "ntfs3", "8:21")
+PERSONAL_ROW = (PERSONAL_PATH, "/dev/dm-0", "ntfs3", "252:0")
+TOOL_MAPPING = f"steamos-mounter-{PERSONAL_UUID}"
+DOLPHIN_MAPPING = f"luks-{PERSONAL_UUID}"
+DM0_NAME = "sys/block/dm-0/dm/name"
+BUSY = Answer(
+    returncode=32, stderr=f"umount: {MEDIABOX_PATH}: target is busy.".encode()
+)
+LATER = (
+    "{name} is mounted at {at} now. The fixed path applies from the next"
+    " plug-in, boot, or mount after an unmount"
+)
+
+
+def auto_record(
+    source: tuple[str, str],
+    *,
+    target: str = MEDIABOX_PATH,
+    mounted: tuple[str, str] = ("/dev/sdb5", "8:21"),
+    status: str = "mounted",
+    mapping: dict | None = None,
+) -> dict:
+    """An auto instance's record of a mount it made (Stage B, B1.1).
+
+    ``source`` is the partition's ``(kname, maj:min)``, ``mounted`` the
+    mounted device's ``(path, maj:min)``: the inner mapping for BitLocker.
+    """
+    kname, devnum = source
+    return record_dict(
+        kind="auto",
+        key=f"{kname}-{devnum.replace(':', '_')}",
+        name="MEDIABOX",
+        state="MountedRW",
+        reason=None,
+        warning=None,
+        next_step=None,
+        mapping=mapping,
+        source={"kname": kname, "devnum": devnum, "syspath": None},
+        mount={
+            "status": status,
+            "target": target,
+            "device": mounted[0],
+            "devnum": mounted[1],
+            "driver": "ntfs3",
+            "mode": "rw",
+            "created_dir": True,
+        },
+    )
+
+
+def mapping_of(name: str) -> dict:
+    return {
+        "name": name,
+        "kname": "dm-0",
+        "devnum": "252:0",
+        "opened_by": "handler",
+        "key_unit_invocation_id": None,
+        "save_pending": False,
+    }
+
+
+@pytest.fixture
+def auto_host(ctx, tmp_path, fake_runner, host_tree):
+    """The Deck's devices plugged in, sysfs too, no registry file."""
+    given_host(ctx, tmp_path)
+    host_tree.add_sysfs_facts()
+    script_tree(fake_runner)
+    return tmp_path
+
+
+def given_mount(
+    root: Path, fake_runner, row: tuple[str, str, str, str], record: tuple | None
+) -> Path:
+    """``row`` live in findmnt, the volume's root showing in its leaf.
+
+    ``record`` is ``(relative path, record dict)``, or None for a mount the
+    tool did not make.
+    """
+    leaf = make_leaf(root, row[0])
+    (leaf / "Movies").mkdir()
+    if record is not None:
+        write_record(root, record[0], json.dumps(record[1]).encode())
+    script_table(fake_runner, findmnt_rows(row))
+    fake_runner.on(readback_argv(row[0]), findmnt_rows(row))
+    return leaf
+
+
+def unmounted(leaf: Path):
+    """A hook for the scripted ``umount``: the volume's root leaves the leaf."""
+    return lambda _command: (leaf / "Movies").rmdir()
+
+
+def test_add_takes_over_the_auto_mount_at_the_fixed_path(ctx, auto_host, fake_runner):
+    record = (SDB5_AUTO_RECORD, auto_record(("sdb5", "8:21")))
+    leaf = given_mount(auto_host, fake_runner, MEDIABOX_ROW, record)
+    fake_runner.on((UMOUNT, MEDIABOX_PATH), Answer(), hook=unmounted(leaf))
+    script_start(fake_runner)
+
+    result = run_cli(ctx, "add", "--device", "/dev/sdb5", "--name", "MEDIABOX")
+
+    assert (result.code, result.err) == (ExitCode.OK, "")
+    assert result.out == (
+        f"registered MEDIABOX ({MEDIABOX_UUID}) at {MEDIABOX_PATH}\n"
+        f"unmounted MEDIABOX from {MEDIABOX_PATH}\n"
+        f"mounting MEDIABOX at {MEDIABOX_PATH} now\n"
+    )
+    assert registry_file(auto_host).read_text(encoding="utf-8") == registry_text(
+        (MEDIABOX,)
+    )
+    assert os.readlink(auto_host / MEDIABOX_LINK) == TEMPLATE
+    saved = read_record(auto_host, SDB5_AUTO_RECORD)
+    assert saved["state"] == "UnmountedByUser"
+    assert saved["unmounted_by_user"] == {"devnum": "8:21", "at": STAMP}
+    assert saved["mount"]["status"] == "unmounted"
+    assert not leaf.exists()  # the auto instance's leaf goes, as with unmount
+    start = verb_argv("start", MEDIABOX_UNIT, block=False)
+    steps = [DAEMON_RELOAD, (UMOUNT, MEDIABOX_PATH), start]
+    assert [argv for argv in fake_runner.argvs if argv in steps] == steps
+
+
+def test_add_takes_over_an_auto_mount_at_another_path(ctx, auto_host, fake_runner):
+    row = (MEDIABOX_ELSEWHERE, "/dev/sdb5", "ntfs3", "8:21")
+    record = (SDB5_AUTO_RECORD, auto_record(("sdb5", "8:21"), target=row[0]))
+    leaf = given_mount(auto_host, fake_runner, row, record)
+    fake_runner.on((UMOUNT, MEDIABOX_ELSEWHERE), Answer(), hook=unmounted(leaf))
+    script_start(fake_runner)
+
+    result = run_cli(ctx, "add", "--device", "/dev/sdb5")
+
+    assert (result.code, result.err) == (ExitCode.OK, "")
+    assert result.out == (
+        f"registered MEDIABOX ({MEDIABOX_UUID}) at {MEDIABOX_PATH}\n"
+        f"unmounted MEDIABOX from {MEDIABOX_ELSEWHERE}\n"
+        f"mounting MEDIABOX at {MEDIABOX_PATH} now\n"
+    )
+
+
+def test_an_auto_mount_gone_before_the_release_just_starts(ctx, auto_host, fake_runner):
+    record = (SDB5_AUTO_RECORD, auto_record(("sdb5", "8:21")))
+    given_mount(auto_host, fake_runner, MEDIABOX_ROW, record)
+    gone = (SDB5_AUTO_RECORD, auto_record(("sdb5", "8:21"), status="unmounted"))
+    fake_runner.on(
+        DAEMON_RELOAD,
+        Answer(),
+        hook=lambda _command: write_record(
+            auto_host, gone[0], json.dumps(gone[1]).encode()
+        ),
+    )
+    script_unit(fake_runner, MEDIABOX_UNIT, "inactive")
+    fake_runner.on(verb_argv("start", MEDIABOX_UNIT, block=False), Answer())
+
+    result = run_cli(ctx, "add", "--device", "/dev/sdb5", "--name", "MEDIABOX")
+
+    # The auto instance let it go meanwhile: nothing to unmount, no line for it.
+    assert (result.code, result.out) == (ExitCode.OK, MEDIABOX_ADDED)
+    assert UMOUNT not in [argv[0] for argv in fake_runner.argvs]
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [BUSY, Answer(returncode=1, stderr=b"umount: bad superblock")],
+    ids=["busy", "failed"],
+)
+def test_an_auto_mount_that_stays_keeps_the_registration_without_a_start(
+    ctx, auto_host, fake_runner, caplog, answer
+):
+    record = (SDB5_AUTO_RECORD, auto_record(("sdb5", "8:21")))
+    leaf = given_mount(auto_host, fake_runner, MEDIABOX_ROW, record)
+    fake_runner.on((UMOUNT, MEDIABOX_PATH), answer)
+    fake_runner.on(DAEMON_RELOAD, Answer())
+
+    result = run_cli(ctx, "add", "--device", "/dev/sdb5", "--name", "MEDIABOX")
+
+    assert (result.code, result.err) == (ExitCode.OK, "")
+    assert result.out == (
+        f"registered MEDIABOX ({MEDIABOX_UUID}) at {MEDIABOX_PATH}\n"
+        + LATER.format(name="MEDIABOX", at=MEDIABOX_PATH)
+        + "\n"
+    )
+    assert config.load(ctx).volumes[0].name == "MEDIABOX"
+    assert os.readlink(auto_host / MEDIABOX_LINK) == TEMPLATE
+    assert systemctl_calls(fake_runner) == [DAEMON_RELOAD]  # no start
+    assert (UMOUNT, "-l", MEDIABOX_PATH) not in fake_runner.argvs
+    assert read_record(auto_host, SDB5_AUTO_RECORD)["state"] == "MountedRW"
+    assert (leaf / "Movies").is_dir()
+    assert f"the auto mount at {MEDIABOX_PATH} stays" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("row", "record", "reason"),
+    [
+        (MEDIABOX_ROW, None, "path is a directory that is not empty"),
+        (
+            MEDIABOX_ROW,
+            (
+                SDB5_AUTO_RECORD,
+                auto_record(("sdb5", "8:21"), status="unmounted"),
+            ),
+            "path is a directory that is not empty",
+        ),
+        (
+            (MEDIABOX_PATH, "/dev/sdc1", "exfat", "8:33"),
+            (SDB5_AUTO_RECORD, auto_record(("sdb5", "8:21"))),
+            "path is a directory that is not empty",
+        ),
+        (
+            (MEDIABOX_PATH, "/dev/dm-0", "ntfs3", "252:0"),
+            (
+                SDB1_AUTO_RECORD,
+                auto_record(("sdb1", "8:17"), mounted=("/dev/dm-0", "252:0")),
+            ),
+            "path is a directory that is not empty",
+        ),
+    ],
+    ids=[
+        "udisks-mount",
+        "udisks-after-unmount",
+        "another-device-at-the-recorded-path",
+        "another-devices-auto-mount",
+    ],
+)
+def test_add_refuses_a_mount_its_auto_instance_did_not_make(
+    ctx, auto_host, fake_runner, row, record, reason
+):
+    given_mount(auto_host, fake_runner, row, record)
+
+    result = run_cli(ctx, "add", "--device", "/dev/sdb5", "--name", "MEDIABOX")
+
+    assert result.code == ExitCode.REFUSED
+    assert result.err == (
+        f"steamos-mounter: cannot register /dev/sdb5: {reason}. {DETAILS}\n"
+    )
+    assert not registry_file(auto_host).exists()
+    assert UMOUNT not in [argv[0] for argv in fake_runner.argvs]
+    assert systemctl_calls(fake_runner) == []
+
+
+def test_rule_6_still_refuses_an_empty_leaf_another_mount_holds(
+    ctx, auto_host, fake_runner
+):
+    leaf = given_mount(auto_host, fake_runner, MEDIABOX_ROW, None)
+    (leaf / "Movies").rmdir()
+
+    result = run_cli(ctx, "add", "--device", "/dev/sdb5", "--name", "MEDIABOX")
+
+    assert result.code == ExitCode.REFUSED
+    assert "path overlaps another registered path or mount" in result.err
+    assert not registry_file(auto_host).exists()
+
+
+def given_personal_auto_mount(ctx, root: Path, fake_runner, mapping: str) -> Path:
+    """PERSONAL unlocked on dm-0 and mounted by the auto instance of sdb1."""
+    make_keys_dir(root)
+    (root / DM0_NAME).write_text(f"{mapping}\n", encoding="utf-8")
+    record = auto_record(
+        ("sdb1", "8:17"),
+        target=PERSONAL_PATH,
+        mounted=("/dev/dm-0", "252:0"),
+        mapping=mapping_of(mapping),
+    )
+    leaf = given_mount(root, fake_runner, PERSONAL_ROW, (SDB1_AUTO_RECORD, record))
+    fake_runner.on((UMOUNT, PERSONAL_PATH), Answer(), hook=unmounted(leaf))
+    fake_runner.on((*TEST_ARGV, "/dev/sdb1"), Answer())
+    script_start(fake_runner, PERSONAL_UNIT)
+    return leaf
+
+
+def test_add_takes_over_the_auto_mount_of_the_unlocked_inner_device(
+    ctx, auto_host, fake_runner, monkeypatch
+):
+    given_personal_auto_mount(ctx, auto_host, fake_runner, DOLPHIN_MAPPING)
+    stdin_key(monkeypatch)
+
+    result = run_cli(
+        ctx, "add", "--device", "/dev/sdb1", "--name", "PERSONAL", "--key-stdin"
+    )
+
+    assert (result.code, result.err) == (ExitCode.OK, "")
+    assert result.out == (
+        f"registered PERSONAL ({PERSONAL_UUID}) at {PERSONAL_PATH}\n"
+        f"unmounted PERSONAL from {PERSONAL_PATH}\n"
+        f"mounting PERSONAL at {PERSONAL_PATH} now\n"
+    )
+    saved = read_record(auto_host, SDB1_AUTO_RECORD)
+    assert saved["unmounted_by_user"]["devnum"] == "252:0"
+    assert saved["mapping"]["name"] == DOLPHIN_MAPPING  # Dolphin's: left open
+    assert (CRYPTSETUP, "close", DOLPHIN_MAPPING) not in fake_runner.argvs
+
+
+def test_a_tool_mapping_that_does_not_close_still_lets_the_registered_start(
+    ctx, auto_host, fake_runner, monkeypatch, caplog
+):
+    given_personal_auto_mount(ctx, auto_host, fake_runner, TOOL_MAPPING)
+    fake_runner.on((CRYPTSETUP, "close", TOOL_MAPPING), Answer(returncode=5))
+    stdin_key(monkeypatch)
+
+    result = run_cli(
+        ctx, "add", "--device", "/dev/sdb1", "--name", "PERSONAL", "--key-stdin"
+    )
+
+    assert (result.code, result.err) == (ExitCode.OK, "")
+    assert result.out.splitlines()[1:] == [
+        f"unmounted PERSONAL from {PERSONAL_PATH}",
+        f"mounting PERSONAL at {PERSONAL_PATH} now",
+    ]
+    assert read_record(auto_host, SDB1_AUTO_RECORD)["mapping"]["name"] == TOOL_MAPPING
+    assert f"{TOOL_MAPPING} stays open" in caplog.text
+    assert TEST_KEY.decode() not in caplog.text + result.out + result.err
 
 
 # --- add: refusals (AC-002, DD-02, D013 reasons) -------------------------------------

@@ -218,7 +218,7 @@ def _dialog_open(ctx: "Context", owner: Owner, view: state.VolumeView) -> bool:
 
 
 @dataclass(slots=True)
-class _Unmounted:
+class Unmounted:
     """What the locked part did, for the record and the output."""
 
     target: str | None = None
@@ -232,12 +232,22 @@ def run_unmount(call: Invocation) -> ExitCode:
     registry = devices.load_registry(ctx)
     tree = blockdev.read_tree(ctx)
     owner = _unmount_owner(call, registry, tree)
+    return _unmount_report(call, owner, release(ctx, owner))
+
+
+def release(ctx: "Context", owner: Owner) -> Unmounted:
+    """Under the volume lock: the normal unmount, the mapping, the record.
+
+    ``unmount`` and ``add`` (taking over its own auto mount) share it. A busy
+    target raises ``MounterError``, any other failed unmount ``ToolError``;
+    nothing is changed then.
+    """
     with locks.volume_lock(ctx, owner.lock_key, timeout=devices.CLI_LOCK_WAIT):
         record = _owned_record(ctx, owner)
-        done = _Unmounted() if record is None else _undo(ctx, owner, record)
+        done = Unmounted() if record is None else _undo(ctx, owner, record)
         if record is not None and (done.target or done.closed):
             _record_unmounted(ctx, owner, record, done)
-    return _unmount_report(call, owner, done)
+    return done
 
 
 def _unmount_owner(call: Invocation, registry: Registry, tree: DeviceTree) -> Owner:
@@ -294,9 +304,9 @@ def _owned_record(ctx: "Context", owner: Owner) -> Record | None:
     return found if isinstance(found, Record) else None
 
 
-def _undo(ctx: "Context", owner: Owner, record: Record) -> _Unmounted:
+def _undo(ctx: "Context", owner: Owner, record: Record) -> Unmounted:
     """The normal unmount, then the tool's own mapping; never lazy, never deferred."""
-    done = _Unmounted()
+    done = Unmounted()
     target = records.own_mount_target(record)
     if target is not None:
         result = mounter.unmount(
@@ -319,7 +329,7 @@ def _undo(ctx: "Context", owner: Owner, record: Record) -> _Unmounted:
 
 
 def _close_mapping(
-    ctx: "Context", mapping: dict[str, Any] | None, done: _Unmounted
+    ctx: "Context", mapping: dict[str, Any] | None, done: Unmounted
 ) -> None:
     name = (mapping or {}).get("name")
     if not isinstance(name, str) or not bitlocker.is_tool_mapping(name):
@@ -333,7 +343,7 @@ def _close_mapping(
 
 
 def _record_unmounted(
-    ctx: "Context", owner: Owner, record: Record, done: _Unmounted
+    ctx: "Context", owner: Owner, record: Record, done: Unmounted
 ) -> None:
     """``UnmountedByUser`` for the mounted device number (DD-11), leaf removed."""
     if done.target is not None and done.created_dir:
@@ -386,7 +396,7 @@ def _remove_leaf(ctx: "Context", target: str) -> None:
         log.warning("%s was not removed: %s", target, error.strerror)
 
 
-def _unmount_report(call: Invocation, owner: Owner, done: _Unmounted) -> ExitCode:
+def _unmount_report(call: Invocation, owner: Owner, done: Unmounted) -> ExitCode:
     out = call.out
     if done.target is None and done.closed is None and done.close_failed is None:
         out.line(f"{owner.name}: not mounted by steamos-mounter")

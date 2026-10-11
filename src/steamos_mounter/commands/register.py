@@ -17,7 +17,9 @@ or ``--key-stdin`` (never argv), tested with cryptsetup, then stored; the
 registry write and the wiring under one hold of the registry lock, then
 ``daemon-reload``; last, a start of the inactive registered instance. Every
 refusal happens before the key is asked for, and nothing is written before
-the last check passed.
+the last check passed. A mount the tool's own auto instance made of the
+device is taken over (``commands.takeover``): the path rules let it pass,
+and it is unmounted before the start; one that stays means no start.
 
 ``remove NAME``: a registry with an invalid entry stops it first (exit 1),
 even when NAME is that entry's; then unwire (the volume's link,
@@ -49,13 +51,20 @@ from steamos_mounter import (
     wiring,
 )
 from steamos_mounter.bitlocker import UnlockOutcome
-from steamos_mounter.commands import Command, Invocation, devices, eligibility
+from steamos_mounter.commands import (
+    Command,
+    Invocation,
+    devices,
+    eligibility,
+    takeover,
+)
 from steamos_mounter.errors import ExitCode, RefusedError, ToolError, UsageError
 from steamos_mounter.escape import BY_UUID_DIR
 from steamos_mounter.journal import NOTICE, fields
 from steamos_mounter.model import InstanceKind, MountInfo, Registry, Step, Volume
 from steamos_mounter.naming import (
     REGISTRY_NAME_RE,
+    PathFacts,
     fallback_name,
     propose_registry_name,
     validate_fixed_path,
@@ -131,14 +140,19 @@ def configure_remove(parser: argparse.ArgumentParser) -> None:
 
 @dataclass(frozen=True, slots=True)
 class _Add:
-    """What ``add`` read once: the registry, the device and the mount table."""
+    """What ``add`` read once: the registry, the device and the mount table.
+
+    ``rows`` are the live mounts of the device and the devices stacked on it,
+    ``auto_mount`` the one of them its own auto instance made.
+    """
 
     ctx: "Context"
     args: argparse.Namespace
     registry: Registry
     device: "BlockDevice"
-    stacked: tuple["BlockDevice", ...]
     table: tuple[MountInfo, ...]
+    rows: tuple[MountInfo, ...]
+    auto_mount: takeover.AutoMount | None
 
 
 def run_add(call: Invocation) -> ExitCode:
@@ -155,13 +169,10 @@ def run_add(call: Invocation) -> ExitCode:
         raise _refused(device, reason)
     config.require_rewritable(registry)
     mountdirs.ensure_mount_base(ctx)
+    table = mounts.table(ctx)
+    rows = _mounts_of((device, *devices.stacked_on(facts.tree, device)), table)
     plan = _Add(
-        ctx,
-        args,
-        registry,
-        device,
-        devices.stacked_on(facts.tree, device),
-        mounts.table(ctx),
+        ctx, args, registry, device, table, rows, takeover.find(ctx, device, rows)
     )
     volume = _volume(plan)
     if volume.fstype == BITLOCKER:
@@ -196,9 +207,11 @@ def _volume(plan: _Add) -> Volume:
     if REGISTRY_NAME_RE.fullmatch(name) is None:
         raise UsageError(BAD_NAME.format(name=name))
     path = args.path or posixpath.join(base, name)
-    facts = mountdirs.HostPathFacts(
+    facts: PathFacts = mountdirs.HostPathFacts(
         plan.ctx.paths, trusted_uid=plan.ctx.platform.trusted_uid
     )
+    if plan.auto_mount is not None and plan.auto_mount.target == path:
+        facts = takeover.BeforeTheMount(facts, path)
     try:
         validate_fixed_path(
             path, mount_base=base, other_paths=_taken_paths(plan), fs=facts
@@ -222,11 +235,22 @@ def _volume(plan: _Add) -> Volume:
 
 
 def _taken_paths(plan: _Add) -> list[str]:
-    """Registered paths and every live mount below the mount base (rule 6)."""
+    """Registered paths and every live mount below the mount base (rule 6).
+
+    The auto mount ``add`` takes over is not taken: it is released.
+    """
     base = plan.ctx.platform.mount_base.rstrip("/") + "/"
     taken = [volume.path for volume in plan.registry.volumes]
-    taken += [row.target for row in plan.table if row.target.startswith(base)]
+    taken += [
+        row.target
+        for row in plan.table
+        if row.target.startswith(base) and not _is_auto_mount(plan, row)
+    ]
     return taken
+
+
+def _is_auto_mount(plan: _Add, row: MountInfo) -> bool:
+    return plan.auto_mount is not None and plan.auto_mount.is_row(row)
 
 
 def _drivers(text: str | None, fstype: str | None) -> tuple[Step, ...] | None:
@@ -292,10 +316,22 @@ def _save(ctx: "Context", volume: Volume) -> None:
 
 
 def _announce(call: Invocation, plan: _Add, volume: Volume) -> None:
-    """The registered name and path, then what happens next (step 7)."""
+    """The registered name and path, then what happens next (step 7).
+
+    An auto mount that stays mounted keeps the volume: no start then.
+    """
     ctx, out = call.ctx, call.out
     out.line(f"registered {volume.name} ({volume.uuid}) at {volume.path}")
-    elsewhere = [row.target for row in _mounts_of(plan) if row.target != volume.path]
+    if plan.auto_mount is not None and not takeover.release(
+        call, plan.auto_mount, volume=volume.name
+    ):
+        out.line(FIXED_PATH_LATER.format(name=volume.name, at=plan.auto_mount.target))
+        return
+    elsewhere = [
+        row.target
+        for row in plan.rows
+        if row.target != volume.path and not _is_auto_mount(plan, row)
+    ]
     owner = devices.registered_owner(volume, plan.device)
     if devices.active_state(ctx, owner.unit) in STOPPED_STATES:
         _start(call, owner.unit, volume)
@@ -303,11 +339,13 @@ def _announce(call: Invocation, plan: _Add, volume: Volume) -> None:
         out.line(FIXED_PATH_LATER.format(name=volume.name, at=elsewhere[0]))
 
 
-def _mounts_of(plan: _Add) -> list[MountInfo]:
-    rows: list[MountInfo] = []
-    for device in (plan.device, *plan.stacked):
-        rows.extend(mounts.for_device(plan.table, device, None))
-    return rows
+def _mounts_of(
+    found: tuple["BlockDevice", ...], table: tuple[MountInfo, ...]
+) -> tuple[MountInfo, ...]:
+    """The live rows of the device and the devices stacked on it."""
+    return tuple(
+        row for device in found for row in mounts.for_device(table, device, None)
+    )
 
 
 def _start(call: Invocation, unit: str, volume: Volume) -> None:
